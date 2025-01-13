@@ -1,4 +1,4 @@
-# Repository-2-lumi-ai-personal-assistant
+#Repository-2-lumi-ai-personal-assistant
 
 Personal AI Agents/Virtual Companions (AI4U)
 
