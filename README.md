@@ -7,7 +7,7 @@ Work Packet #2
 This woerk packet focuses on developing AI-powered personal agents and virtual companions within the ReMeLife ecosystem, designed to provide comprehensive support for users, especially elderly individuals and their care circles.
  
 Key Objectives:
-1.	Personalized AI Agents: Create a suite of customizable AI agents that users can choose from or personalize, serving as their primary interface within the AI4U platform.
+1.	Personalized AI Agents: Create a suite of customizable AI agents that users can choose from or personalize, serving as their primary interface within the Lumi platform.
 2.	Multifunctional Support: Develop AI agents capable of performing various tasks to support the needs of care recipients and their care circles, leveraging growing ELR® knowledge.
 3.	Social Interaction: Implement AI-driven virtual companions that can engage in conversations, play games, and offer reminders for daily tasks, combating isolation and loneliness, 1, 3
 4.	Caregiver Assistance: Integrate task management systems, stress reduction techniques, and AI-driven advice for caregivers, addressing common caregiving challenges. 2
