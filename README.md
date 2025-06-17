@@ -1,6 +1,6 @@
 #Repository-2-lumi-ai-personal-assistant
 
-Personal AI Agents/Virtual Companions (AI4U)
+Personal AI Agents/Virtual Companions 
 
 Work Packet #2 
  
@@ -31,7 +31,7 @@ The integration process involves:
 18.	Continuous Learning Loop: Establishing feedback mechanisms to constantly improve Lumi's performance and accuracy based on user interactions and outcomes. 2
 By leveraging these technologies and processes, Lumi AI will provide a highly personalized, intuitive, and supportive experience for elderly users, enhancing their independence and quality of life while seamlessly integrating with the broader ReMeLife ecosystem. 1, 3
  
-Python code structure for Work Packet #2: Personal AI Agents/Virtual Companions (AI4U).
+Python code structure for Work Packet #2: Personal AI Agents/Virtual Companions  .
 1.	Analysis of requirements:
 •	Personalized AI agents
 •	Multifunctional support
