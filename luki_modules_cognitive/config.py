@@ -104,6 +104,7 @@ class CognitiveConfig(BaseSettings):
     )
     
     model_config = {
+        "extra": "ignore",
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "env_prefix": "",
