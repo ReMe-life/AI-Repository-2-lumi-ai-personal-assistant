@@ -168,6 +168,25 @@ async def get_activities():
         logger.error(f"Error fetching activities: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch activities")
 
+# World day activities endpoint
+@app.get("/world-day-activities/{user_id}")
+async def get_world_day_activities(user_id: str):
+    """Get today's world day activities (ReMeMades) for a user"""
+    if not cognitive_tools:
+        raise HTTPException(status_code=503, detail="Cognitive tools not available")
+
+    try:
+        result = await cognitive_tools.get_world_day_activities(user_id)
+        if not result.get("success"):
+            logger.error(f"Error fetching world day activities: {result.get('error')}")
+            raise HTTPException(status_code=500, detail="Failed to fetch world day activities")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching world day activities: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch world day activities")
+
 # Cognitive tools endpoint
 @app.get("/tools")
 async def get_cognitive_tools():
