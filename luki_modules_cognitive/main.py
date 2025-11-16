@@ -13,7 +13,7 @@ import logging
 from .config import CognitiveConfig
 from .recommender.recommend import ActivityRecommender
 from .data.activity_catalog import ActivityCatalog
-from .interfaces.agent_tools import CognitiveTools
+from .interfaces.agent_tools import CognitiveTools, COGNITIVE_TOOL_DEFINITIONS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -177,15 +177,18 @@ async def get_cognitive_tools():
     
     try:
         # This is a placeholder - implement actual tools logic
-        tools = [
-            {
-                "name": "memory_assessment",
-                "description": "Assess memory capabilities",
-                "category": "assessment"
-            }
-        ]
+        tools = []
+        for tool_def in COGNITIVE_TOOL_DEFINITIONS:
+            tools.append({
+                "name": tool_def.get("name"),
+                "description": tool_def.get("description"),
+                "parameters": tool_def.get("parameters"),
+            })
         
-        return {"tools": tools}
+        return {
+            "tools": tools,
+            "total_tools": len(tools),
+        }
     except Exception as e:
         logger.error(f"Error fetching cognitive tools: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch cognitive tools")
