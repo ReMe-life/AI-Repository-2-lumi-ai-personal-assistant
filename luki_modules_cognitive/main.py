@@ -145,14 +145,23 @@ async def get_activities():
     
     try:
         # This is a placeholder - implement actual catalog logic
-        activities = [
-            {
-                "id": "activity_1",
-                "title": "Morning Meditation",
-                "category": "wellness",
-                "tags": ["mindfulness", "morning", "relaxation"]
-            }
-        ]
+        activities = []
+        for activity in activity_catalog.activities.values():
+            activities.append({
+                "id": activity.id,
+                "title": activity.title,
+                "description": activity.description,
+                "category": activity.activity_type.value,
+                "type": activity.activity_type.value,
+                "module": activity.module.value,
+                "cognitive_level": [level.value for level in activity.cognitive_level],
+                "tags": activity.tags,
+                "duration_minutes": activity.duration_minutes,
+                "requires_carer": activity.requires_carer,
+                "supports_group": activity.supports_group,
+                "world_day_theme": activity.world_day_theme,
+                "content_type": activity.content_type,
+            })
         
         return {"activities": activities}
     except Exception as e:
