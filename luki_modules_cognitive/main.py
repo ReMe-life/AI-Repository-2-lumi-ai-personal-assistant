@@ -3,6 +3,7 @@ FastAPI application for LUKi Cognitive Modules
 """
 
 import os
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -55,6 +56,11 @@ class RecommendationRequest(BaseModel):
     preferences: Optional[Dict[str, Any]] = None
     context: Optional[Dict[str, Any]] = None
     max_recommendations: Optional[int] = 5
+    current_mood: Optional[str] = None
+    available_duration: Optional[int] = None
+    carer_available: bool = True
+    group_setting: bool = False
+    specific_request: Optional[str] = None
 
 class RecommendationResponse(BaseModel):
     recommendations: List[Dict[str, Any]]
@@ -97,27 +103,35 @@ async def root():
 @app.post("/recommendations", response_model=RecommendationResponse)
 async def get_recommendations(request: RecommendationRequest):
     """Get personalized activity recommendations"""
-    if not activity_recommender:
-        raise HTTPException(status_code=503, detail="Activity recommender not available")
+    if not cognitive_tools:
+        raise HTTPException(status_code=503, detail="Cognitive tools not available")
     
     try:
-        # This is a placeholder - implement actual recommendation logic
-        recommendations = [
-            {
-                "id": "activity_1",
-                "title": "Morning Meditation",
-                "description": "Start your day with mindfulness",
-                "category": "wellness",
-                "duration": 10,
-                "difficulty": "easy"
-            }
-        ]
-        
+        context_data = request.context or {}
+        current_mood = request.current_mood or context_data.get("current_mood")
+        available_duration = request.available_duration or context_data.get("available_duration")
+        specific_request = request.specific_request or context_data.get("specific_request")
+        max_recommendations = request.max_recommendations or config.max_recommendations
+        result = await cognitive_tools.recommend_activity(
+            user_id=request.user_id,
+            current_mood=current_mood,
+            available_duration=available_duration,
+            carer_available=request.carer_available,
+            group_setting=request.group_setting,
+            specific_request=specific_request,
+            max_recommendations=max_recommendations,
+        )
+        if not result.get("success"):
+            logger.error(f"Error generating recommendations: {result.get('error')}")
+            raise HTTPException(status_code=500, detail="Failed to generate recommendations")
+        recommendations = result.get("recommendations", [])
         return RecommendationResponse(
             recommendations=recommendations,
             user_id=request.user_id,
-            timestamp="2024-01-01T00:00:00Z"  # Use actual timestamp
+            timestamp=datetime.utcnow().isoformat()
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating recommendations: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate recommendations")
