@@ -96,6 +96,12 @@ class CognitiveConfig(BaseSettings):
         description="Respect ELR consent flags"
     )
     
+    security_service_url: str = Field(
+        default="http://localhost:8103",
+        alias="COGNITIVE_SECURITY_SERVICE_URL",
+        description="URL for LUKi Security & Privacy Service"
+    )
+    
     # Logging
     log_level: str = Field(
         default="INFO",
