@@ -1,7 +1,14 @@
 from fastapi.testclient import TestClient
+import pathlib
+import sys
 
-from luki_modules_cognitive.main import app
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import luki_modules_cognitive.main as cognitive_main
+
+app = cognitive_main.app
 
 
 def test_recommendations_blocked_when_policy_denies(monkeypatch) -> None:
