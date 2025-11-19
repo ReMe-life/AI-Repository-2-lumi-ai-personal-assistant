@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
 
+import httpx
+
 from .config import CognitiveConfig
 from .recommender.recommend import ActivityRecommender
 from .data.activity_catalog import ActivityCatalog
@@ -28,6 +30,79 @@ app = FastAPI(
     description="Personalised activity creation, cognitive stimulation & wellbeing analytics",
     version="0.1.0"
 )
+
+def _consent_checks_enabled() -> bool:
+    """Return True if consent/policy checks should be applied for secondary uses."""
+    return bool(getattr(config, "respect_consent_flags", True))
+
+
+async def _enforce_cognitive_policy(
+    user_id: str,
+    requested_scopes: Optional[List[str]] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Call security service policy/enforce for cognitive recommendations.
+
+    Defaults to requesting personalization and analytics scopes. When consent
+    checks are disabled via configuration, this returns allowed=True without
+    making an external call.
+    """
+    if not _consent_checks_enabled():
+        return {"allowed": True, "reason": "consent_checks_disabled"}
+
+    scopes = requested_scopes or ["personalization", "analytics"]
+
+    payload: Dict[str, Any] = {
+        "user_id": user_id,
+        "requester_role": "cognitive_service",
+        "requested_scopes": scopes,
+    }
+    if context:
+        payload["context"] = context
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{config.security_service_url}/policy/enforce",
+                json=payload,
+            )
+
+        try:
+            raw = response.json()
+        except ValueError:
+            raw = {"detail": response.text}
+
+        if isinstance(raw, dict):
+            data: Dict[str, Any] = raw
+        else:
+            data = {"detail": raw}
+
+        if response.status_code == 200:
+            return {
+                "allowed": bool(data.get("allowed", True)),
+                "scopes_checked": data.get("scopes_checked", []),
+                "reason": data.get("reason", "consent_valid"),
+                "detail": data.get("detail"),
+            }
+
+        return {
+            "allowed": False,
+            "error": data.get("error", "policy_denied"),
+            "detail": data.get("detail"),
+            "status_code": response.status_code,
+        }
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.error(
+            "Cognitive policy enforcement request failed for user %s: %s",
+            user_id,
+            str(exc),
+        )
+        return {
+            "allowed": False,
+            "error": "policy_request_failed",
+            "detail": str(exc),
+        }
+
 
 # Add CORS middleware
 app.add_middleware(
@@ -107,6 +182,27 @@ async def get_recommendations(request: RecommendationRequest):
         raise HTTPException(status_code=503, detail="Cognitive tools not available")
     
     try:
+        policy = await _enforce_cognitive_policy(
+            user_id=request.user_id,
+            context={
+                "endpoint": "recommendations",
+                "max_recommendations": request.max_recommendations,
+            },
+        )
+        if not policy.get("allowed", True):
+            logger.info(
+                "Cognitive recommendations blocked by policy for user %s: %s",
+                request.user_id,
+                policy.get("error"),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": policy.get("error", "consent_denied"),
+                    "policy": policy,
+                },
+            )
+
         context_data = request.context or {}
         current_mood = request.current_mood or context_data.get("current_mood")
         available_duration = request.available_duration or context_data.get("available_duration")
@@ -176,6 +272,24 @@ async def get_world_day_activities(user_id: str):
         raise HTTPException(status_code=503, detail="Cognitive tools not available")
 
     try:
+        policy = await _enforce_cognitive_policy(
+            user_id=user_id,
+            context={"endpoint": "world-day-activities"},
+        )
+        if not policy.get("allowed", True):
+            logger.info(
+                "World day activities blocked by policy for user %s: %s",
+                user_id,
+                policy.get("error"),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": policy.get("error", "consent_denied"),
+                    "policy": policy,
+                },
+            )
+
         result = await cognitive_tools.get_world_day_activities(user_id)
         if not result.get("success"):
             logger.error(f"Error fetching world day activities: {result.get('error')}")
