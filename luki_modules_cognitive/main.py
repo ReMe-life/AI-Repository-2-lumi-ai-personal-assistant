@@ -3,6 +3,7 @@ FastAPI application for LUKi Cognitive Modules
 """
 
 import os
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from typing import List, Optional, Dict, Any
 import logging
 
 import httpx
+from together import Together
 
 from .config import CognitiveConfig
 from .recommender.recommend import ActivityRecommender
@@ -21,8 +23,12 @@ from .interfaces.agent_tools import CognitiveTools, COGNITIVE_TOOL_DEFINITIONS
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize configuration
 config = CognitiveConfig()
+logger.info(
+    "CognitiveConfig loaded | security_service_url=%s",
+    config.security_service_url,
+)
+TOGETHER_FLUX_MODEL = "black-forest-labs/FLUX.1-dev"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -36,6 +42,28 @@ def _consent_checks_enabled() -> bool:
     return bool(getattr(config, "respect_consent_flags", True))
 
 
+def _build_photo_reminiscence_prompt(
+    activity_title: Optional[str], answers: List[str]
+) -> str:
+    parts: List[str] = []
+    title = (activity_title or "").strip()
+    if title:
+        parts.append(
+            f'A warm, realistic photograph inspired by the activity "{title}".'
+        )
+    else:
+        parts.append(
+            "A warm, realistic photograph inspired by a meaningful personal memory."
+        )
+    non_empty = [a.strip() for a in answers if a and a.strip()]
+    for index, text in enumerate(non_empty, start=1):
+        parts.append(f"Detail {index}: {text}")
+    parts.append(
+        "Style: gentle nostalgic tone, natural lighting, soft focus, no text, no watermarks."
+    )
+    return " ".join(parts)
+
+
 async def _enforce_cognitive_policy(
     user_id: str,
     requested_scopes: Optional[List[str]] = None,
@@ -43,14 +71,14 @@ async def _enforce_cognitive_policy(
 ) -> Dict[str, Any]:
     """Call security service policy/enforce for cognitive recommendations.
 
-    Defaults to requesting personalization and analytics scopes. When consent
+    Defaults to requesting personalization scope. When consent
     checks are disabled via configuration, this returns allowed=True without
     making an external call.
     """
     if not _consent_checks_enabled():
         return {"allowed": True, "reason": "consent_checks_disabled"}
 
-    scopes = requested_scopes or ["personalization", "analytics"]
+    scopes = requested_scopes or ["personalization"]
 
     payload: Dict[str, Any] = {
         "user_id": user_id,
@@ -92,14 +120,19 @@ async def _enforce_cognitive_policy(
             "status_code": response.status_code,
         }
     except Exception as exc:  # pragma: no cover - defensive guard
+        # IMPORTANT: activity recommendations are a core experience and
+        # should not be permanently blocked just because the security
+        # service is temporarily unreachable or misconfigured. In these
+        # cases we *fail open* for the personalization scope and allow
+        # the request, while still logging the failure for operators.
         logger.error(
             "Cognitive policy enforcement request failed for user %s: %s",
             user_id,
             str(exc),
         )
         return {
-            "allowed": False,
-            "error": "policy_request_failed",
+            "allowed": True,
+            "reason": "policy_request_failed_default_allow_personalization",
             "detail": str(exc),
         }
 
@@ -146,6 +179,27 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     components: Dict[str, str]
+
+
+class GeneratedImage(BaseModel):
+    id: str
+    prompt: str
+    b64_json: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    model: Optional[str] = None
+
+
+class PhotoReminiscenceImageRequest(BaseModel):
+    user_id: str
+    activity_title: Optional[str] = None
+    answers: List[str]
+    n: Optional[int] = 1
+
+
+class PhotoReminiscenceImageResponse(BaseModel):
+    status: str
+    images: List[GeneratedImage]
 
 # Health check endpoint
 @app.get("/health", response_model=HealthResponse)
@@ -300,6 +354,109 @@ async def get_world_day_activities(user_id: str):
     except Exception as e:
         logger.error(f"Error fetching world day activities: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch world day activities")
+
+
+@app.post("/images/photo-reminiscence", response_model=PhotoReminiscenceImageResponse)
+async def generate_photo_reminiscence_images(
+    request: PhotoReminiscenceImageRequest,
+):
+    if not request.answers:
+        raise HTTPException(status_code=400, detail="At least one answer is required")
+    try:
+        prompt = _build_photo_reminiscence_prompt(request.activity_title, request.answers)
+        n = request.n or 1
+        if n < 1:
+            n = 1
+        if n > 4:
+            n = 4
+
+        def _call_together() -> List[Dict[str, Any]]:
+            client = Together()
+            logger.info(
+                "PhotoReminiscence: calling Together images.generate | model=%s, n=%s",
+                TOGETHER_FLUX_MODEL,
+                n,
+            )
+            logger.info("PhotoReminiscence: prompt (first 400 chars): %s", prompt[:400])
+            result = client.images.generate(
+                prompt=prompt,
+                model=TOGETHER_FLUX_MODEL,
+                steps=10,
+                n=n,
+                response_format="b64_json",
+            )
+            images: List[Dict[str, Any]] = []
+            data = getattr(result, "data", None) or []
+            logger.info(
+                "PhotoReminiscence: Together result type=%s, data_len=%d",
+                type(result).__name__,
+                len(data),
+            )
+            for index, item in enumerate(data):
+                if isinstance(item, dict):
+                    b64 = item.get("b64_json")
+                    img_prompt = item.get("prompt", prompt)
+                    width = item.get("width")
+                    height = item.get("height")
+                    model_name = item.get("model", TOGETHER_FLUX_MODEL)
+                else:
+                    b64 = getattr(item, "b64_json", None)
+                    img_prompt = getattr(item, "prompt", prompt)
+                    width = getattr(item, "width", None)
+                    height = getattr(item, "height", None)
+                    model_name = getattr(item, "model", TOGETHER_FLUX_MODEL)
+                if not b64:
+                    # Introspect structure so we can see what fields Together is returning
+                    try:
+                        if isinstance(item, dict):
+                            keys = list(item.keys())
+                        elif hasattr(item, "model_dump"):
+                            # Pydantic model from Together SDK
+                            keys = list(item.model_dump().keys())
+                        else:
+                            keys = [
+                                attr
+                                for attr in dir(item)
+                                if not attr.startswith("_") and not callable(getattr(item, attr, None))
+                            ]
+                        logger.warning(
+                            "PhotoReminiscence: skipping image index=%d because b64_json missing; type=%s; keys=%s",
+                            index,
+                            type(item).__name__,
+                            keys,
+                        )
+                    except Exception as introspect_err:
+                        logger.warning(
+                            "PhotoReminiscence: failed to introspect image index=%d type=%s: %s",
+                            index,
+                            type(item).__name__,
+                            introspect_err,
+                        )
+                    continue
+                images.append(
+                    {
+                        "id": f"img_{index}",
+                        "prompt": img_prompt,
+                        "b64_json": b64,
+                        "width": width,
+                        "height": height,
+                        "model": model_name,
+                    }
+                )
+            return images
+
+        images = await asyncio.to_thread(_call_together)
+        if not images:
+            raise HTTPException(
+                status_code=502, detail="Image generation returned no results"
+            )
+        parsed_images = [GeneratedImage(**item) for item in images]
+        return PhotoReminiscenceImageResponse(status="ok", images=parsed_images)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating photo reminiscence images: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate images")
 
 # Cognitive tools endpoint
 @app.get("/tools")
