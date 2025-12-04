@@ -13,6 +13,9 @@ sentence-transformers>=2.2.0
 scikit-learn>=1.3.0
 spacy>=3.6.0
 
+# Image generation
+together>=1.2.0
+
 # Vector Storage & Embeddings
 chromadb>=0.4.0
 faiss-cpu>=1.7.0
