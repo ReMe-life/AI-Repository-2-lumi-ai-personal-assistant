@@ -1,5 +1,10 @@
 # luki-modules-cognitive  
 *Personalised activity creation, cognitive stimulation & wellbeing analytics for ReMeLife*
+---
+
+## License
+
+This project is licensed under the [Apache 2.0 License with ReMeLife custom clauses]
 
 ---
 
