@@ -41,9 +41,9 @@ USER app
 # Expose port
 EXPOSE 8000
 
-# Health check
+# Health check - uses PORT env var
 HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD python -c "import requests, os; requests.get(f'http://localhost:{os.getenv(\"PORT\", \"8000\")}/health')" || exit 1
 
-# Start command
-CMD ["python", "-m", "uvicorn", "luki_modules_cognitive.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start command - use startup.py to handle PORT dynamically
+CMD ["python", "startup.py"]

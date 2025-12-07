@@ -7,6 +7,14 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
+def _get_default_security_url() -> str:
+    """Auto-detect production environment and return appropriate security service URL."""
+    # Railway sets RAILWAY_ENVIRONMENT or RAILWAY_PROJECT_ID in production
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return "https://luki-security-privacy-production.up.railway.app"
+    return "http://localhost:8103"
+
+
 class CognitiveConfig(BaseSettings):
     """Configuration for cognitive modules"""
     
@@ -97,7 +105,7 @@ class CognitiveConfig(BaseSettings):
     )
     
     security_service_url: str = Field(
-        default="http://localhost:8103",
+        default_factory=_get_default_security_url,
         alias="COGNITIVE_SECURITY_SERVICE_URL",
         description="URL for LUKi Security & Privacy Service"
     )
