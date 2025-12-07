@@ -12,6 +12,14 @@ import json
 from ..recommender.recommend import ActivityRecommender, RecommendationContext, ActivityEngagement
 from ..data.activity_catalog import ActivityCatalog, ActivityType, CognitiveLevel
 from ..data.elr_adapter import ELRAdapter
+from ..data.life_story import (
+    LifeStoryAdapter,
+    LifeStorySession,
+    LifeStoryChunk,
+    LifeStoryPhase,
+    PHASE_PROMPTS,
+    PHASE_ORDER,
+)
 from ..config import get_config
 
 
@@ -23,6 +31,7 @@ class CognitiveTools:
         self.recommender = ActivityRecommender()
         self.catalog = ActivityCatalog()
         self.elr_adapter = ELRAdapter()
+        self.life_story_adapter = LifeStoryAdapter()
     
     async def close(self):
         """Close resources"""
@@ -434,6 +443,293 @@ class CognitiveTools:
                 'prompt': "Tell me about a special memory from your life."
             }
 
+    # ==================== LIFE STORY RECORDING ====================
+    
+    async def start_life_story_session(self, user_id: str) -> Dict[str, Any]:
+        """
+        Start a new life story recording session for a user.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Dictionary with session info and first prompt
+        """
+        try:
+            # Check for existing active session
+            active_session = await self.life_story_adapter.get_active_session(user_id)
+            if active_session:
+                # Resume existing session
+                phase_config = self.life_story_adapter.get_phase_prompt(active_session.current_phase)
+                return {
+                    'success': True,
+                    'session_id': active_session.session_id,
+                    'resumed': True,
+                    'current_phase': active_session.current_phase.value,
+                    'phase_index': active_session.current_phase_index,
+                    'total_phases': len(PHASE_ORDER),
+                    'prompt': phase_config.get('prompt', ''),
+                    'skip_allowed': phase_config.get('skip_allowed', True),
+                    'chunks_recorded': len(active_session.chunks),
+                    'message': "Welcome back! Let's continue where we left off."
+                }
+            
+            # Create new session
+            session = await self.life_story_adapter.create_session(user_id)
+            phase_config = self.life_story_adapter.get_phase_prompt(session.current_phase)
+            
+            return {
+                'success': True,
+                'session_id': session.session_id,
+                'resumed': False,
+                'current_phase': session.current_phase.value,
+                'phase_index': session.current_phase_index,
+                'total_phases': len(PHASE_ORDER),
+                'prompt': phase_config.get('prompt', ''),
+                'skip_allowed': phase_config.get('skip_allowed', False),
+                'message': "Let's begin capturing your life story."
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'message': "I had trouble starting the life story session. Please try again."
+            }
+    
+    async def continue_life_story_session(
+        self,
+        user_id: str,
+        session_id: str,
+        response_text: str,
+        skip_phase: bool = False,
+        approximate_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Continue a life story session by recording a response and advancing.
+        
+        Args:
+            user_id: User identifier
+            session_id: Session identifier
+            response_text: User's response to the current prompt
+            skip_phase: Whether to skip this phase without recording
+            approximate_date: Optional date context (e.g., "1960s", "childhood")
+            
+        Returns:
+            Dictionary with next prompt or completion status
+        """
+        try:
+            session = await self.life_story_adapter.get_session(session_id, user_id)
+            if not session:
+                return {
+                    'success': False,
+                    'error': 'session_not_found',
+                    'message': "I couldn't find that session. Would you like to start a new one?"
+                }
+            
+            if session.status != "in_progress":
+                return {
+                    'success': False,
+                    'error': 'session_completed',
+                    'message': "This life story session is already complete."
+                }
+            
+            # Record chunk unless skipping
+            if not skip_phase and response_text and response_text.strip():
+                await self.life_story_adapter.add_chunk(
+                    session=session,
+                    response_text=response_text.strip(),
+                    approximate_date=approximate_date,
+                )
+            
+            # Advance to next phase
+            next_phase = await self.life_story_adapter.advance_phase(session)
+            
+            if next_phase is None or next_phase == LifeStoryPhase.SUMMARY:
+                # Session complete - finalize
+                completed_session = await self.life_story_adapter.complete_session(session)
+                return {
+                    'success': True,
+                    'completed': True,
+                    'session_id': session_id,
+                    'summary': completed_session.summary,
+                    'chunks_recorded': len(completed_session.chunks),
+                    'duration_minutes': completed_session.total_duration_minutes,
+                    'message': "Thank you so much for sharing your story with me. Your memories have been safely saved.",
+                    'prompt': PHASE_PROMPTS[LifeStoryPhase.SUMMARY].get('follow_up', '')
+                }
+            
+            # Get next phase prompt
+            phase_config = self.life_story_adapter.get_phase_prompt(next_phase)
+            
+            return {
+                'success': True,
+                'completed': False,
+                'session_id': session_id,
+                'current_phase': next_phase.value,
+                'phase_index': session.current_phase_index,
+                'total_phases': len(PHASE_ORDER),
+                'prompt': phase_config.get('prompt', ''),
+                'follow_ups': phase_config.get('follow_ups', []),
+                'skip_allowed': phase_config.get('skip_allowed', True),
+                'chunks_recorded': len(session.chunks),
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'message': "I had trouble saving that. Let's try again."
+            }
+    
+    async def get_life_story_sessions(
+        self,
+        user_id: str,
+        include_chunks: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Get all life story sessions for a user.
+        
+        Args:
+            user_id: User identifier
+            include_chunks: Whether to include full chunk details
+            
+        Returns:
+            Dictionary with list of sessions
+        """
+        try:
+            sessions = await self.life_story_adapter.get_user_sessions(user_id)
+            
+            formatted_sessions = []
+            for session in sessions:
+                session_info = {
+                    'session_id': session.session_id,
+                    'status': session.status,
+                    'started_at': session.started_at.isoformat(),
+                    'completed_at': session.completed_at.isoformat() if session.completed_at else None,
+                    'chunks_count': len(session.chunks),
+                    'phases_covered': list(set(c.phase.value for c in session.chunks)),
+                    'summary': session.summary,
+                    'duration_minutes': session.total_duration_minutes,
+                }
+                
+                if include_chunks:
+                    session_info['chunks'] = [
+                        {
+                            'chunk_id': c.chunk_id,
+                            'phase': c.phase.value,
+                            'response_preview': c.response[:100] + '...' if len(c.response) > 100 else c.response,
+                            'approximate_date': c.approximate_date,
+                            'timestamp': c.timestamp.isoformat(),
+                        }
+                        for c in session.chunks
+                    ]
+                
+                formatted_sessions.append(session_info)
+            
+            return {
+                'success': True,
+                'sessions': formatted_sessions,
+                'total_sessions': len(formatted_sessions),
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'sessions': []
+            }
+    
+    async def delete_life_story_session(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Delete a life story session.
+        
+        Args:
+            user_id: User identifier
+            session_id: Session to delete
+            
+        Returns:
+            Dictionary with deletion status
+        """
+        try:
+            success = await self.life_story_adapter.delete_session(session_id, user_id)
+            
+            if success:
+                return {
+                    'success': True,
+                    'message': "Your life story session has been deleted."
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': 'deletion_failed',
+                    'message': "I couldn't delete that session. Please try again."
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'message': "Something went wrong while deleting the session."
+            }
+    
+    async def get_life_story_prompt_for_phase(
+        self,
+        phase: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get the prompt for a specific life story phase.
+        Optionally personalized based on user's ELR.
+        
+        Args:
+            phase: Phase name
+            user_id: Optional user ID for personalization
+            
+        Returns:
+            Dictionary with phase prompt info
+        """
+        try:
+            phase_enum = LifeStoryPhase(phase)
+            phase_config = self.life_story_adapter.get_phase_prompt(phase_enum)
+            
+            result = {
+                'success': True,
+                'phase': phase,
+                'prompt': phase_config.get('prompt', ''),
+                'follow_ups': phase_config.get('follow_ups', []),
+                'skip_allowed': phase_config.get('skip_allowed', True),
+            }
+            
+            # Optionally personalize based on ELR
+            if user_id:
+                profile = await self.elr_adapter.get_user_elr_profile(user_id)
+                if profile and profile.interests:
+                    # Add personalized follow-up based on interests
+                    for interest in profile.interests[:2]:
+                        personalized = f"Did {interest} play a role in this part of your life?"
+                        if personalized not in result.get('follow_ups', []):
+                            result.setdefault('follow_ups', []).append(personalized)
+            
+            return result
+            
+        except ValueError:
+            return {
+                'success': False,
+                'error': 'invalid_phase',
+                'message': f"Unknown phase: {phase}",
+                'valid_phases': [p.value for p in LifeStoryPhase]
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
 
 # Tool registration functions for LUKi agent
 def get_cognitive_tools() -> CognitiveTools:
@@ -513,6 +809,69 @@ COGNITIVE_TOOL_DEFINITIONS = [
                 "user_id": {"type": "string", "description": "User identifier"}
             },
             "required": ["user_id"]
+        }
+    },
+    # Life Story Recording Tools
+    {
+        "name": "start_life_story_session",
+        "description": "Start a guided life story recording session. This is a multi-turn journey where the user shares memories from different life phases (childhood, education, career, relationships, achievements, challenges). Use this when a user wants to record or share their life story.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier"}
+            },
+            "required": ["user_id"]
+        }
+    },
+    {
+        "name": "continue_life_story_session",
+        "description": "Continue an active life story recording session by saving the user's response and moving to the next phase",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier"},
+                "session_id": {"type": "string", "description": "Session identifier from start_life_story_session"},
+                "response_text": {"type": "string", "description": "User's response to the current prompt"},
+                "skip_phase": {"type": "boolean", "description": "Skip this phase without recording", "default": False},
+                "approximate_date": {"type": "string", "description": "Optional date context like '1960s', 'childhood', 'age 25'"}
+            },
+            "required": ["user_id", "session_id", "response_text"]
+        }
+    },
+    {
+        "name": "get_life_story_sessions",
+        "description": "Get all life story sessions for a user, including completed and in-progress sessions",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier"},
+                "include_chunks": {"type": "boolean", "description": "Whether to include detailed memory chunks", "default": False}
+            },
+            "required": ["user_id"]
+        }
+    },
+    {
+        "name": "delete_life_story_session",
+        "description": "Delete a life story session and all its recorded memories",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User identifier"},
+                "session_id": {"type": "string", "description": "Session to delete"}
+            },
+            "required": ["user_id", "session_id"]
+        }
+    },
+    {
+        "name": "get_life_story_prompt_for_phase",
+        "description": "Get the prompt for a specific life story phase, optionally personalized for a user",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phase": {"type": "string", "description": "Phase name", "enum": ["introduction", "childhood", "education", "work_career", "relationships", "achievements", "challenges", "special_memories", "summary"]},
+                "user_id": {"type": "string", "description": "Optional user ID for personalization"}
+            },
+            "required": ["phase"]
         }
     }
 ]
