@@ -295,6 +295,30 @@ class PhotoReminiscenceImageResponse(BaseModel):
     status: str
     images: List[GeneratedImage]
 
+
+# Life Story Recording models
+class LifeStoryStartRequest(BaseModel):
+    user_id: str
+
+
+class LifeStoryContinueRequest(BaseModel):
+    user_id: str
+    session_id: str
+    response_text: str
+    skip_phase: bool = False
+    approximate_date: Optional[str] = None
+
+
+class LifeStorySessionsRequest(BaseModel):
+    user_id: str
+    include_chunks: bool = False
+
+
+class LifeStoryDeleteRequest(BaseModel):
+    user_id: str
+    session_id: str
+
+
 # Health check endpoint
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -317,9 +341,20 @@ async def root():
     """Root endpoint"""
     return {
         "service": "LUKi Cognitive Modules",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "status": "running",
-        "endpoints": ["/health", "/recommendations", "/activities"]
+        "endpoints": [
+            "/health",
+            "/recommendations",
+            "/activities",
+            "/world-day-activities/{user_id}",
+            "/images/photo-reminiscence",
+            "/life-story/start",
+            "/life-story/continue",
+            "/life-story/sessions/{user_id}",
+            "/life-story/phases",
+            "/tools",
+        ]
     }
 
 # Activity recommendations endpoint
@@ -557,6 +592,222 @@ async def generate_photo_reminiscence_images(
     except Exception as e:
         logger.error(f"Error generating photo reminiscence images: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate images")
+
+# ==================== LIFE STORY RECORDING ENDPOINTS ====================
+
+@app.post("/life-story/start")
+async def start_life_story(request: LifeStoryStartRequest):
+    """Start a new life story recording session"""
+    if not cognitive_tools:
+        raise HTTPException(status_code=503, detail="Cognitive tools not available")
+    
+    try:
+        # Enforce policy for life story (high sensitivity data)
+        policy = await _enforce_cognitive_policy(
+            user_id=request.user_id,
+            context={
+                "endpoint": "life-story-start",
+                "sensitivity": "high",
+            },
+        )
+        if not policy.get("allowed", True):
+            logger.info(
+                "Life story recording blocked by policy for user %s: %s",
+                request.user_id,
+                policy.get("error"),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": policy.get("error", "consent_denied"),
+                    "policy": policy,
+                },
+            )
+        
+        result = await cognitive_tools.start_life_story_session(request.user_id)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error", "Failed to start session"))
+        
+        # Log without sensitive data
+        logger.info(
+            "Life story session started: user_id=%s, session_id=%s, resumed=%s",
+            request.user_id[:8] + "...",  # Truncate for privacy
+            result.get("session_id", "")[:8] + "...",
+            result.get("resumed", False),
+        )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting life story session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to start life story session")
+
+
+@app.post("/life-story/continue")
+async def continue_life_story(request: LifeStoryContinueRequest):
+    """Continue a life story session with a new response"""
+    if not cognitive_tools:
+        raise HTTPException(status_code=503, detail="Cognitive tools not available")
+    
+    try:
+        # Enforce policy
+        policy = await _enforce_cognitive_policy(
+            user_id=request.user_id,
+            context={
+                "endpoint": "life-story-continue",
+                "sensitivity": "high",
+                "session_id": request.session_id,
+            },
+        )
+        if not policy.get("allowed", True):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": policy.get("error", "consent_denied"),
+                    "policy": policy,
+                },
+            )
+        
+        result = await cognitive_tools.continue_life_story_session(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            response_text=request.response_text,
+            skip_phase=request.skip_phase,
+            approximate_date=request.approximate_date,
+        )
+        
+        if not result.get("success"):
+            error = result.get("error", "Failed to continue session")
+            if error == "session_not_found":
+                raise HTTPException(status_code=404, detail="Session not found")
+            raise HTTPException(status_code=500, detail=error)
+        
+        # Log without sensitive content
+        logger.info(
+            "Life story chunk recorded: session_id=%s, phase=%s, completed=%s",
+            request.session_id[:8] + "...",
+            result.get("current_phase", "unknown"),
+            result.get("completed", False),
+        )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error continuing life story session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to continue life story session")
+
+
+@app.get("/life-story/sessions/{user_id}")
+async def get_life_story_sessions(user_id: str, include_chunks: bool = False):
+    """Get all life story sessions for a user"""
+    if not cognitive_tools:
+        raise HTTPException(status_code=503, detail="Cognitive tools not available")
+    
+    try:
+        # Enforce policy
+        policy = await _enforce_cognitive_policy(
+            user_id=user_id,
+            context={
+                "endpoint": "life-story-sessions",
+                "sensitivity": "high",
+            },
+        )
+        if not policy.get("allowed", True):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": policy.get("error", "consent_denied"),
+                    "policy": policy,
+                },
+            )
+        
+        result = await cognitive_tools.get_life_story_sessions(
+            user_id=user_id,
+            include_chunks=include_chunks,
+        )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching life story sessions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch life story sessions")
+
+
+@app.delete("/life-story/sessions/{session_id}")
+async def delete_life_story_session(session_id: str, user_id: str):
+    """Delete a life story session"""
+    if not cognitive_tools:
+        raise HTTPException(status_code=503, detail="Cognitive tools not available")
+    
+    try:
+        # Enforce policy
+        policy = await _enforce_cognitive_policy(
+            user_id=user_id,
+            context={
+                "endpoint": "life-story-delete",
+                "sensitivity": "high",
+                "session_id": session_id,
+            },
+        )
+        if not policy.get("allowed", True):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": policy.get("error", "consent_denied"),
+                    "policy": policy,
+                },
+            )
+        
+        result = await cognitive_tools.delete_life_story_session(
+            user_id=user_id,
+            session_id=session_id,
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error", "Failed to delete session"))
+        
+        logger.info(
+            "Life story session deleted: session_id=%s",
+            session_id[:8] + "...",
+        )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting life story session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete life story session")
+
+
+@app.get("/life-story/phases")
+async def get_life_story_phases():
+    """Get all available life story phases and their prompts"""
+    from .data.life_story import PHASE_ORDER, PHASE_PROMPTS
+    
+    phases = []
+    for i, phase in enumerate(PHASE_ORDER):
+        config = PHASE_PROMPTS.get(phase, {})
+        phases.append({
+            "phase": phase.value,
+            "index": i,
+            "prompt": config.get("prompt", ""),
+            "follow_ups": config.get("follow_ups", []),
+            "skip_allowed": config.get("skip_allowed", True),
+        })
+    
+    return {
+        "phases": phases,
+        "total_phases": len(phases),
+    }
+
 
 # Cognitive tools endpoint
 @app.get("/tools")
