@@ -38,12 +38,8 @@ RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
 USER app
 
-# Expose port
-EXPOSE 8000
-
-# Health check - uses PORT env var
-HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
-    CMD python -c "import requests, os; requests.get(f'http://localhost:{os.getenv(\"PORT\", \"8000\")}/health')" || exit 1
+# Expose port - must match Railway's PORT
+EXPOSE 8080
 
 # Start command - use startup.py to handle PORT dynamically
 CMD ["python", "startup.py"]
