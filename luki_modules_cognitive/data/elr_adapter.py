@@ -86,7 +86,15 @@ class ActivityEngagement:
 
 
 class ELRAdapter:
-    """Adapter for integrating with LUKi Memory Service ELR data"""
+    """Adapter for integrating with LUKi Memory Service ELR data.
+    
+    Uses in-memory storage for profiles and activity history since
+    the Memory Service KV store is not available.
+    """
+    
+    # In-memory storage for user profiles and activity history
+    _profiles: Dict[str, 'ELRProfile'] = {}
+    _activity_history: Dict[str, List['ActivityEngagement']] = {}
     
     def __init__(self):
         self.config = get_config()
@@ -98,27 +106,12 @@ class ELRAdapter:
         await self.client.aclose()
     
     async def get_user_elr_profile(self, user_id: str) -> Optional[ELRProfile]:
-        """Retrieve user's ELR profile from memory service"""
-        try:
-            # Get structured ELR data
-            response = await self.client.get(
-                f"{self.memory_service_url}/v1/kv/get",
-                params={"user_id": user_id, "key": "elr_profile"}
-            )
-            
-            if response.status_code == 200:
-                elr_data = response.json().get('value', {})
-                return ELRProfile.from_elr_data(user_id, elr_data)
-            elif response.status_code == 404:
-                # No ELR profile exists yet, create basic one
-                return await self._create_basic_profile(user_id)
-            else:
-                print(f"Error retrieving ELR profile: {response.status_code}")
-                return None
-                
-        except Exception as e:
-            print(f"Error connecting to memory service: {e}")
-            return None
+        """Retrieve user's ELR profile from in-memory storage"""
+        if user_id in self._profiles:
+            return self._profiles[user_id]
+        
+        # No profile exists, create a basic one
+        return await self._create_basic_profile(user_id)
     
     async def _create_basic_profile(self, user_id: str) -> ELRProfile:
         """Create a basic ELR profile for new users"""
@@ -139,111 +132,57 @@ class ELRAdapter:
             memory_triggers=[]
         )
         
-        # Store the basic profile
+        # Store the basic profile in memory
         await self.update_elr_profile(basic_profile)
         return basic_profile
     
     async def update_elr_profile(self, profile: ELRProfile) -> bool:
-        """Update user's ELR profile in memory service"""
+        """Update user's ELR profile in in-memory storage"""
         try:
-            profile_data = {
-                'preferences': profile.preferences,
-                'interests': profile.interests,
-                'cognitive_level': profile.cognitive_level,
-                'mobility_level': profile.mobility_level,
-                'communication_style': profile.communication_style,
-                'favorite_activities': profile.favorite_activities,
-                'music_preferences': profile.music_preferences,
-                'photo_themes': profile.photo_themes,
-                'family_context': profile.family_context,
-                'care_goals': profile.care_goals,
-                'recent_engagement': profile.recent_engagement,
-                'mood_patterns': profile.mood_patterns,
-                'memory_triggers': profile.memory_triggers
-            }
-            
-            response = await self.client.post(
-                f"{self.memory_service_url}/v1/kv/set",
-                json={
-                    "user_id": profile.user_id,
-                    "key": "elr_profile",
-                    "value": profile_data
-                }
-            )
-            
-            return response.status_code == 200
-            
+            self._profiles[profile.user_id] = profile
+            return True
         except Exception as e:
             print(f"Error updating ELR profile: {e}")
             return False
     
     async def get_user_activity_history(self, user_id: str, days: int = 30) -> List[ActivityEngagement]:
-        """Get user's recent activity engagement history"""
+        """Get user's recent activity engagement history from in-memory storage"""
         try:
-            # Query activity engagement data from memory service
-            response = await self.client.get(
-                f"{self.memory_service_url}/v1/kv/get",
-                params={"user_id": user_id, "key": "activity_history"}
-            )
+            history = self._activity_history.get(user_id, [])
             
-            if response.status_code == 200:
-                history_data = response.json().get('value', [])
-                engagements = []
-                
-                cutoff_date = datetime.utcnow() - timedelta(days=days)
-                
-                for engagement_data in history_data:
-                    timestamp = datetime.fromisoformat(engagement_data['timestamp'])
-                    if timestamp >= cutoff_date:
-                        engagement = ActivityEngagement(
-                            user_id=engagement_data['user_id'],
-                            activity_id=engagement_data['activity_id'],
-                            activity_type=engagement_data['activity_type'],
-                            engagement_score=engagement_data['engagement_score'],
-                            duration_minutes=engagement_data['duration_minutes'],
-                            completion_status=engagement_data['completion_status'],
-                            feedback=engagement_data.get('feedback'),
-                            mood_before=engagement_data.get('mood_before'),
-                            mood_after=engagement_data.get('mood_after'),
-                            carer_notes=engagement_data.get('carer_notes'),
-                            timestamp=timestamp
-                        )
-                        engagements.append(engagement)
-                
-                return sorted(engagements, key=lambda x: x.timestamp, reverse=True)
+            if not history:
+                return []
             
-            return []
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            
+            # Filter by date range
+            recent = [eng for eng in history if eng.timestamp >= cutoff_date]
+            
+            return sorted(recent, key=lambda x: x.timestamp, reverse=True)
             
         except Exception as e:
             print(f"Error retrieving activity history: {e}")
             return []
     
     async def record_activity_engagement(self, engagement: ActivityEngagement) -> bool:
-        """Record a new activity engagement"""
+        """Record a new activity engagement in in-memory storage"""
         try:
-            # Get existing history
-            history = await self.get_user_activity_history(engagement.user_id, days=365)
+            user_id = engagement.user_id
+            
+            if user_id not in self._activity_history:
+                self._activity_history[user_id] = []
             
             # Add new engagement
-            history.append(engagement)
+            self._activity_history[user_id].append(engagement)
             
             # Keep only last 100 engagements to prevent unlimited growth
-            history = sorted(history, key=lambda x: x.timestamp, reverse=True)[:100]
+            self._activity_history[user_id] = sorted(
+                self._activity_history[user_id],
+                key=lambda x: x.timestamp,
+                reverse=True
+            )[:100]
             
-            # Convert to storage format
-            history_data = [eng.to_dict() for eng in history]
-            
-            # Store updated history
-            response = await self.client.post(
-                f"{self.memory_service_url}/v1/kv/set",
-                json={
-                    "user_id": engagement.user_id,
-                    "key": "activity_history",
-                    "value": history_data
-                }
-            )
-            
-            return response.status_code == 200
+            return True
             
         except Exception as e:
             print(f"Error recording activity engagement: {e}")
