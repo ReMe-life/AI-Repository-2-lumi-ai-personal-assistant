@@ -78,7 +78,7 @@ class ActivityRecommender:
     
     async def get_recommendations(self, 
                                 context: RecommendationContext,
-                                max_recommendations: int = None) -> List[ActivityRecommendation]:
+                                max_recommendations: Optional[int] = None) -> List[ActivityRecommendation]:
         """Get personalized activity recommendations"""
         if max_recommendations is None:
             max_recommendations = self.config.max_recommendations
