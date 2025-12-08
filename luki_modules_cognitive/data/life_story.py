@@ -309,10 +309,10 @@ class LifeStoryAdapter:
         
         session.chunks.append(chunk)
         
-        # Also store chunk as individual ELR entry for searchability
-        await self._store_chunk_as_elr(chunk)
+        # NOTE: We don't store individual chunks - only save ONE combined entry
+        # when the session is completed via complete_session()
         
-        # Save updated session
+        # Save updated session in memory
         await self._save_session(session)
         
         return chunk
@@ -335,7 +335,7 @@ class LifeStoryAdapter:
         session: LifeStorySession,
         summary: Optional[str] = None,
     ) -> LifeStorySession:
-        """Mark session as completed and generate summary"""
+        """Mark session as completed and store the complete life story"""
         session.status = "completed"
         session.completed_at = datetime.utcnow()
         
@@ -343,14 +343,14 @@ class LifeStoryAdapter:
             duration = session.completed_at - session.started_at
             session.total_duration_minutes = int(duration.total_seconds() / 60)
         
-        # Generate summary if not provided
+        # Generate a simple title/summary for display
         if summary:
             session.summary = summary
         else:
-            session.summary = self._generate_session_summary(session)
+            session.summary = self._generate_session_title(session)
         
-        # Store summary as separate ELR entry
-        await self._store_session_summary_as_elr(session)
+        # Store the COMPLETE story as ONE entry (all user responses)
+        await self._store_complete_story_as_elr(session)
         
         await self._save_session(session)
         return session
@@ -392,29 +392,44 @@ class LifeStoryAdapter:
     async def _store_chunk_as_elr(self, chunk: LifeStoryChunk) -> bool:
         """Store chunk as individual ELR memory entry"""
         try:
-            # Create ELR-compatible memory entry
+            # Create ELR-compatible memory entry matching ELRIngestionRequest schema
+            # IMPORTANT: ChromaDB metadata can only store str, int, float, bool - NOT lists or None!
+            # Convert lists to JSON strings and handle None values
+            import json
+            
             memory_data = {
                 "user_id": chunk.user_id,
-                "content": chunk.response,
-                "content_type": self.CONTENT_TYPE,
-                "sensitivity": self.SENSITIVITY_LEVEL,
-                "metadata": {
-                    "source": "life_story_recording",
-                    "session_id": chunk.session_id,
-                    "chunk_id": chunk.chunk_id,
-                    "phase": chunk.phase.value,
-                    "approximate_date": chunk.approximate_date,
-                    "themes": chunk.themes,
-                    "people_mentioned": chunk.people_mentioned,
-                    "places_mentioned": chunk.places_mentioned,
-                    "media_ids": chunk.media_ids,
-                }
+                "elr_data": {
+                    "content": chunk.response,
+                    "content_type": "MEMORY",  # Use valid ELRContentType
+                    "timestamp": chunk.timestamp.isoformat() if chunk.timestamp else datetime.utcnow().isoformat(),
+                    "metadata": {
+                        "source": "life_story_recording",
+                        "is_life_story": True,
+                        "life_story_type": self.CONTENT_TYPE,
+                        "session_id": chunk.session_id,
+                        "chunk_id": chunk.chunk_id,
+                        "phase": chunk.phase.value,
+                        "approximate_date": chunk.approximate_date or "",
+                        # Convert lists to JSON strings for ChromaDB compatibility
+                        "themes": json.dumps(chunk.themes) if chunk.themes else "[]",
+                        "people_mentioned": json.dumps(chunk.people_mentioned) if chunk.people_mentioned else "[]",
+                        "places_mentioned": json.dumps(chunk.places_mentioned) if chunk.places_mentioned else "[]",
+                        "media_ids": json.dumps(chunk.media_ids) if chunk.media_ids else "[]",
+                    }
+                },
+                "source_file": "life_story_recording",
+                "sensitivity_level": "sensitive",  # Life story data is sensitive
+                "consent_level": "private"
             }
             
             response = await self.client.post(
                 f"{self.memory_service_url}/ingestion/elr",
                 json=memory_data
             )
+            
+            if response.status_code != 200:
+                print(f"ELR storage failed with status {response.status_code}: {response.text}")
             
             return response.status_code == 200
         except Exception as e:
@@ -422,25 +437,46 @@ class LifeStoryAdapter:
             # Don't fail the session if ELR storage fails
             return False
     
-    async def _store_session_summary_as_elr(self, session: LifeStorySession) -> bool:
-        """Store session summary as ELR entry"""
-        if not session.summary:
+    async def _store_complete_story_as_elr(self, session: LifeStorySession) -> bool:
+        """Store the complete life story as a single ELR entry with all user responses"""
+        if not session.chunks:
             return False
         
         try:
+            import json
+            
+            # Build the complete story from all chunks - user's actual responses only
+            story_content = self._build_complete_story(session)
+            
+            # Create ELR-compatible memory entry
+            # IMPORTANT: ChromaDB metadata can only store str, int, float, bool - NOT lists or None!
             memory_data = {
                 "user_id": session.user_id,
-                "content": session.summary,
-                "content_type": f"{self.CONTENT_TYPE}_summary",
-                "sensitivity": self.SENSITIVITY_LEVEL,
-                "metadata": {
-                    "source": "life_story_recording",
-                    "session_id": session.session_id,
-                    "is_summary": True,
-                    "phases_completed": [c.phase.value for c in session.chunks],
-                    "total_chunks": len(session.chunks),
-                    "duration_minutes": session.total_duration_minutes,
-                }
+                "elr_data": {
+                    "content": story_content,
+                    "content_type": "MEMORY",
+                    "timestamp": session.completed_at.isoformat() if session.completed_at else session.started_at.isoformat(),
+                    "metadata": {
+                        "source": "life_story_recording",
+                        "life_story_type": self.CONTENT_TYPE,
+                        "session_id": session.session_id,
+                        "is_life_story": True,
+                        # Store individual chunks as JSON for full story display
+                        "story_chunks": json.dumps([
+                            {
+                                "phase": c.phase.value,
+                                "response": c.response,
+                                "approximate_date": c.approximate_date or ""
+                            } for c in session.chunks
+                        ]),
+                        "phases_completed": json.dumps([c.phase.value for c in session.chunks]),
+                        "total_chapters": len(session.chunks),
+                        "duration_minutes": session.total_duration_minutes or 0,
+                    }
+                },
+                "source_file": "life_story_complete",
+                "sensitivity_level": "sensitive",
+                "consent_level": "private"
             }
             
             response = await self.client.post(
@@ -448,41 +484,51 @@ class LifeStoryAdapter:
                 json=memory_data
             )
             
+            if response.status_code != 200:
+                print(f"ELR summary storage failed with status {response.status_code}: {response.text}")
+            
             return response.status_code == 200
         except Exception as e:
             print(f"Error storing session summary as ELR: {e}")
             # Don't fail if ELR storage fails
             return False
     
-    def _generate_session_summary(self, session: LifeStorySession) -> str:
-        """Generate a brief summary of the life story session"""
+    def _generate_session_title(self, session: LifeStorySession) -> str:
+        """Generate a simple title for the life story session"""
         if not session.chunks:
-            return "Life story session with no recorded memories."
+            return "My Life Story"
         
-        phases_covered = list(set(c.phase.value for c in session.chunks))
-        chunk_count = len(session.chunks)
+        # Use the date as part of the title
+        date_str = session.started_at.strftime("%B %d, %Y") if session.started_at else "Today"
+        return f"My Life Story - {date_str}"
+    
+    def _build_complete_story(self, session: LifeStorySession) -> str:
+        """Build the complete life story from all chunks - user's actual responses"""
+        if not session.chunks:
+            return ""
         
-        summary_parts = [
-            f"Life story recording session covering {len(phases_covered)} life phases",
-            f"with {chunk_count} memories shared.",
-        ]
-        
-        # Add brief mention of phases
-        phase_names = {
-            "childhood": "childhood memories",
-            "education": "education experiences",
-            "work_career": "career journey",
-            "relationships": "important relationships",
-            "achievements": "proud achievements",
-            "challenges": "life challenges",
-            "special_memories": "special moments",
+        # Phase display names for chapter headers
+        phase_titles = {
+            "introduction": "Introduction",
+            "childhood": "Childhood",
+            "education": "Education",
+            "work_career": "Career",
+            "relationships": "Relationships",
+            "achievements": "Achievements",
+            "challenges": "Challenges",
+            "special_memories": "Special Memories",
+            "summary": "Closing Thoughts",
         }
         
-        covered_names = [phase_names.get(p, p) for p in phases_covered if p in phase_names]
-        if covered_names:
-            summary_parts.append(f"Includes {', '.join(covered_names[:3])}.")
+        story_parts = []
+        for chunk in session.chunks:
+            phase_title = phase_titles.get(chunk.phase.value, chunk.phase.value.replace("_", " ").title())
+            # Just the user's actual response - no headers in stored content
+            # Headers will be added by the UI when displaying
+            story_parts.append(chunk.response)
         
-        return " ".join(summary_parts)
+        # Join with paragraph breaks
+        return "\n\n".join(story_parts)
     
     def get_phase_prompt(self, phase: LifeStoryPhase) -> Dict[str, Any]:
         """Get the prompt configuration for a phase"""
