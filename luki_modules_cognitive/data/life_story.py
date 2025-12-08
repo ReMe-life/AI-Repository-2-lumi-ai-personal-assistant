@@ -216,10 +216,19 @@ class LifeStorySession:
 
 
 class LifeStoryAdapter:
-    """Adapter for storing and retrieving life story data via Memory Service"""
+    """Adapter for storing and retrieving life story data.
+    
+    Uses in-memory storage for active sessions and ELR ingestion for 
+    permanent storage of completed chunks and summaries.
+    """
     
     SENSITIVITY_LEVEL = "high"  # Life story data is high sensitivity
     CONTENT_TYPE = "life_story"
+    
+    # In-memory session storage (keyed by session_id)
+    _sessions: Dict[str, LifeStorySession] = {}
+    # Index of sessions per user (keyed by user_id -> list of session_ids)
+    _user_sessions: Dict[str, List[str]] = {}
     
     def __init__(self):
         self.config = get_config()
@@ -240,25 +249,23 @@ class LifeStoryAdapter:
             current_phase_index=0,
         )
         
-        await self._save_session(session)
+        # Store in memory
+        self._sessions[session.session_id] = session
+        
+        # Update user index
+        if user_id not in self._user_sessions:
+            self._user_sessions[user_id] = []
+        if session.session_id not in self._user_sessions[user_id]:
+            self._user_sessions[user_id].append(session.session_id)
+        
         return session
     
     async def get_session(self, session_id: str, user_id: str) -> Optional[LifeStorySession]:
-        """Retrieve an existing session"""
-        try:
-            response = await self.client.get(
-                f"{self.memory_service_url}/v1/kv/get",
-                params={"user_id": user_id, "key": f"life_story_session:{session_id}"}
-            )
-            
-            if response.status_code == 200:
-                data = response.json().get("value")
-                if data:
-                    return LifeStorySession.from_dict(data)
-            return None
-        except Exception as e:
-            print(f"Error retrieving life story session: {e}")
-            return None
+        """Retrieve an existing session from memory"""
+        session = self._sessions.get(session_id)
+        if session and session.user_id == user_id:
+            return session
+        return None
     
     async def get_active_session(self, user_id: str) -> Optional[LifeStorySession]:
         """Get user's currently active (in-progress) session if any"""
@@ -270,24 +277,13 @@ class LifeStoryAdapter:
     
     async def get_user_sessions(self, user_id: str) -> List[LifeStorySession]:
         """Get all life story sessions for a user"""
-        try:
-            response = await self.client.get(
-                f"{self.memory_service_url}/v1/kv/get",
-                params={"user_id": user_id, "key": "life_story_sessions_index"}
-            )
-            
-            if response.status_code == 200:
-                session_ids = response.json().get("value", [])
-                sessions = []
-                for sid in session_ids:
-                    session = await self.get_session(sid, user_id)
-                    if session:
-                        sessions.append(session)
-                return sorted(sessions, key=lambda s: s.started_at, reverse=True)
-            return []
-        except Exception as e:
-            print(f"Error retrieving user sessions: {e}")
-            return []
+        session_ids = self._user_sessions.get(user_id, [])
+        sessions = []
+        for sid in session_ids:
+            session = self._sessions.get(sid)
+            if session:
+                sessions.append(session)
+        return sorted(sessions, key=lambda s: s.started_at, reverse=True)
     
     async def add_chunk(
         self,
@@ -360,35 +356,16 @@ class LifeStoryAdapter:
         return session
     
     async def delete_session(self, session_id: str, user_id: str) -> bool:
-        """Delete a life story session and its chunks"""
+        """Delete a life story session from memory"""
         try:
-            # Remove session from index
-            response = await self.client.get(
-                f"{self.memory_service_url}/v1/kv/get",
-                params={"user_id": user_id, "key": "life_story_sessions_index"}
-            )
+            # Remove from session storage
+            if session_id in self._sessions:
+                del self._sessions[session_id]
             
-            if response.status_code == 200:
-                session_ids = response.json().get("value", [])
-                if session_id in session_ids:
-                    session_ids.remove(session_id)
-                    await self.client.post(
-                        f"{self.memory_service_url}/v1/kv/set",
-                        json={
-                            "user_id": user_id,
-                            "key": "life_story_sessions_index",
-                            "value": session_ids
-                        }
-                    )
-            
-            # Delete session data
-            await self.client.post(
-                f"{self.memory_service_url}/v1/kv/delete",
-                json={
-                    "user_id": user_id,
-                    "key": f"life_story_session:{session_id}"
-                }
-            )
+            # Remove from user index
+            if user_id in self._user_sessions:
+                if session_id in self._user_sessions[user_id]:
+                    self._user_sessions[user_id].remove(session_id)
             
             return True
         except Exception as e:
@@ -396,41 +373,16 @@ class LifeStoryAdapter:
             return False
     
     async def _save_session(self, session: LifeStorySession) -> bool:
-        """Save session to memory service"""
+        """Save session to in-memory storage"""
         try:
-            # Save session data
-            response = await self.client.post(
-                f"{self.memory_service_url}/v1/kv/set",
-                json={
-                    "user_id": session.user_id,
-                    "key": f"life_story_session:{session.session_id}",
-                    "value": session.to_dict()
-                }
-            )
+            # Update session in memory
+            self._sessions[session.session_id] = session
             
-            if response.status_code != 200:
-                return False
-            
-            # Update sessions index
-            index_response = await self.client.get(
-                f"{self.memory_service_url}/v1/kv/get",
-                params={"user_id": session.user_id, "key": "life_story_sessions_index"}
-            )
-            
-            session_ids = []
-            if index_response.status_code == 200:
-                session_ids = index_response.json().get("value", [])
-            
-            if session.session_id not in session_ids:
-                session_ids.append(session.session_id)
-                await self.client.post(
-                    f"{self.memory_service_url}/v1/kv/set",
-                    json={
-                        "user_id": session.user_id,
-                        "key": "life_story_sessions_index",
-                        "value": session_ids
-                    }
-                )
+            # Ensure user index is updated
+            if session.user_id not in self._user_sessions:
+                self._user_sessions[session.user_id] = []
+            if session.session_id not in self._user_sessions[session.user_id]:
+                self._user_sessions[session.user_id].append(session.session_id)
             
             return True
         except Exception as e:
@@ -460,13 +412,14 @@ class LifeStoryAdapter:
             }
             
             response = await self.client.post(
-                f"{self.memory_service_url}/memories/ingest",
+                f"{self.memory_service_url}/ingestion/elr",
                 json=memory_data
             )
             
             return response.status_code == 200
         except Exception as e:
             print(f"Error storing chunk as ELR: {e}")
+            # Don't fail the session if ELR storage fails
             return False
     
     async def _store_session_summary_as_elr(self, session: LifeStorySession) -> bool:
@@ -491,13 +444,14 @@ class LifeStoryAdapter:
             }
             
             response = await self.client.post(
-                f"{self.memory_service_url}/memories/ingest",
+                f"{self.memory_service_url}/ingestion/elr",
                 json=memory_data
             )
             
             return response.status_code == 200
         except Exception as e:
             print(f"Error storing session summary as ELR: {e}")
+            # Don't fail if ELR storage fails
             return False
     
     def _generate_session_summary(self, session: LifeStorySession) -> str:
