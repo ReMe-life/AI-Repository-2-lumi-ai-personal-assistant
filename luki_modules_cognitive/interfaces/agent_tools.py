@@ -502,7 +502,7 @@ class CognitiveTools:
         self,
         user_id: str,
         session_id: str,
-        response_text: str,
+        response_text: Optional[str] = None,
         skip_phase: bool = False,
         approximate_date: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -581,6 +581,64 @@ class CognitiveTools:
                 'success': False,
                 'error': str(e),
                 'message': "I had trouble saving that. Let's try again."
+            }
+    
+    async def finish_life_story_early(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Finish a life story session early, saving whatever chapters have been recorded.
+        
+        Args:
+            user_id: User identifier
+            session_id: Session identifier
+            
+        Returns:
+            Dictionary with completion status
+        """
+        try:
+            session = await self.life_story_adapter.get_session(session_id, user_id)
+            if not session:
+                return {
+                    'success': False,
+                    'error': 'session_not_found',
+                    'message': "I couldn't find that session."
+                }
+            
+            if session.status != "in_progress":
+                return {
+                    'success': False,
+                    'error': 'session_already_completed',
+                    'message': "This life story session is already complete."
+                }
+            
+            if not session.chunks:
+                return {
+                    'success': False,
+                    'error': 'no_chapters_recorded',
+                    'message': "You haven't recorded any chapters yet. Please share at least one memory before finishing."
+                }
+            
+            # Complete the session with whatever has been recorded
+            completed_session = await self.life_story_adapter.complete_session(session)
+            
+            return {
+                'success': True,
+                'completed': True,
+                'session_id': session_id,
+                'summary': completed_session.summary,
+                'chunks_recorded': len(completed_session.chunks),
+                'duration_minutes': completed_session.total_duration_minutes,
+                'message': f"Your life story with {len(completed_session.chunks)} chapter{'s' if len(completed_session.chunks) != 1 else ''} has been saved. Thank you for sharing!",
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'message': "I had trouble saving your story. Let's try again."
             }
     
     async def get_life_story_sessions(
