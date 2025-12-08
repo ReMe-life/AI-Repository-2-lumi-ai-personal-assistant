@@ -61,7 +61,7 @@ class Activity:
     world_day_theme: Optional[str] = None
     content_type: Optional[str] = None  # video, music, image, text
     difficulty_adaptable: bool = True
-    engagement_metrics: Dict[str, Any] = None
+    engagement_metrics: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
         if self.engagement_metrics is None:
@@ -255,7 +255,7 @@ class ActivityCatalog:
                 matching_activities.append(activity)
         return matching_activities
     
-    def get_world_day_activities(self, world_day_theme: str = None) -> List[Activity]:
+    def get_world_day_activities(self, world_day_theme: Optional[str] = None) -> List[Activity]:
         """Get ReMeMades activities, optionally filtered by theme"""
         rememades = self.get_activities_by_type(ActivityType.REMEMADE)
         if world_day_theme:
@@ -274,13 +274,13 @@ class ActivityCatalog:
                 if not activity.supports_group or activity.module == ActivityModule.PERSONAL]
     
     def search_activities(self, 
-                         query: str = None,
-                         activity_type: ActivityType = None,
-                         module: ActivityModule = None,
-                         cognitive_level: CognitiveLevel = None,
-                         tags: List[str] = None,
-                         requires_carer: bool = None,
-                         supports_group: bool = None) -> List[Activity]:
+                         query: Optional[str] = None,
+                         activity_type: Optional[ActivityType] = None,
+                         module: Optional[ActivityModule] = None,
+                         cognitive_level: Optional[CognitiveLevel] = None,
+                         tags: Optional[List[str]] = None,
+                         requires_carer: Optional[bool] = None,
+                         supports_group: Optional[bool] = None) -> List[Activity]:
         """Search activities with multiple filters"""
         results = list(self.activities.values())
         
