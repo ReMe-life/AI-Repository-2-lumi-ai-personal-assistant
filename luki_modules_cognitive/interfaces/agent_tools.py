@@ -36,6 +36,7 @@ class CognitiveTools:
     async def close(self):
         """Close resources"""
         await self.recommender.close()
+        await self.life_story_adapter.close()
     
     async def recommend_activity(self, 
                                user_id: str,
