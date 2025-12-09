@@ -17,7 +17,6 @@ from ..config import get_config
 
 class LifeStoryPhase(str, Enum):
     """Phases of life story recording journey"""
-    INTRODUCTION = "introduction"
     CHILDHOOD = "childhood"
     EDUCATION = "education"
     WORK_CAREER = "work_career"
@@ -30,7 +29,6 @@ class LifeStoryPhase(str, Enum):
 
 # Phase order for guided journey
 PHASE_ORDER = [
-    LifeStoryPhase.INTRODUCTION,
     LifeStoryPhase.CHILDHOOD,
     LifeStoryPhase.EDUCATION,
     LifeStoryPhase.WORK_CAREER,
@@ -44,11 +42,6 @@ PHASE_ORDER = [
 
 # Warm, comfortable prompts for each phase
 PHASE_PROMPTS: Dict[LifeStoryPhase, Dict[str, Any]] = {
-    LifeStoryPhase.INTRODUCTION: {
-        "prompt": "Let's capture some of your life story together. We'll go through different chapters of your life at your own pace. There's no rush — share as much or as little as feels comfortable. Ready to begin?",
-        "follow_up": "Wonderful! Let's start with your earliest memories.",
-        "skip_allowed": False,
-    },
     LifeStoryPhase.CHILDHOOD: {
         "prompt": "Tell me about your childhood. Where did you grow up? What was your home like?",
         "follow_ups": [
@@ -546,3 +539,102 @@ class LifeStoryAdapter:
         except ValueError:
             pass
         return None
+    
+    async def update_session_images(
+        self, 
+        user_id: str, 
+        session_id: str, 
+        images: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        Update a life story session with generated images.
+        
+        Args:
+            user_id: User ID who owns the session
+            session_id: The life story session ID
+            images: Dict mapping chapter index (as string) to base64 image data
+        
+        Returns:
+            Success status and updated session info
+        """
+        import json
+        
+        # First, get the existing memory for this session
+        try:
+            # Search for the life story memory by session_id
+            search_response = await self.client.post(
+                f"{self.memory_service_url}/search/memories",
+                json={
+                    "user_id": user_id,
+                    "query": f"life story session {session_id}",
+                    "limit": 10,
+                    "filters": {
+                        "source": "life_story_recording",
+                        "session_id": session_id
+                    }
+                }
+            )
+            
+            if search_response.status_code != 200:
+                print(f"Failed to find life story memory: {search_response.text}")
+                return {"success": False, "message": "Could not find life story memory"}
+            
+            search_result = search_response.json()
+            memories = search_result.get("results", [])
+            
+            if not memories:
+                # Try a broader search
+                print(f"No memories found for session {session_id}, trying broader search")
+                return {"success": False, "message": "Life story memory not found"}
+            
+            # Find the memory with matching session_id
+            target_memory = None
+            for memory in memories:
+                metadata = memory.get("metadata", {})
+                if metadata.get("session_id") == session_id:
+                    target_memory = memory
+                    break
+            
+            if not target_memory:
+                target_memory = memories[0]  # Use first result as fallback
+            
+            memory_id = target_memory.get("id")
+            metadata = target_memory.get("metadata", {})
+            
+            # Parse existing story_chunks
+            story_chunks_json = metadata.get("story_chunks", "[]")
+            try:
+                story_chunks = json.loads(story_chunks_json)
+            except:
+                story_chunks = []
+            
+            # Update chunks with image data
+            for idx_str, image_data in images.items():
+                idx = int(idx_str)
+                if idx < len(story_chunks):
+                    story_chunks[idx]["image_url"] = image_data
+            
+            # Update the memory with new story_chunks
+            updated_metadata = {**metadata, "story_chunks": json.dumps(story_chunks)}
+            
+            update_response = await self.client.patch(
+                f"{self.memory_service_url}/memories/{memory_id}",
+                json={
+                    "user_id": user_id,
+                    "metadata": updated_metadata
+                }
+            )
+            
+            if update_response.status_code != 200:
+                print(f"Failed to update memory: {update_response.text}")
+                return {"success": False, "message": "Failed to update memory with images"}
+            
+            return {
+                "success": True,
+                "message": f"Updated {len(images)} chapter images",
+                "memory_id": memory_id
+            }
+            
+        except Exception as e:
+            print(f"Error updating session images: {e}")
+            return {"success": False, "message": str(e)}
