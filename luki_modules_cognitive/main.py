@@ -35,8 +35,8 @@ logger.info(
 )
 TOGETHER_FLUX_MODEL = "black-forest-labs/FLUX.1-dev"
 PHOTO_RATE_WINDOW_SECONDS = 3600
-PHOTO_MAX_IMAGES_PER_MEMORY = 5
-PHOTO_MAX_MEMORIES_PER_USER = 3
+PHOTO_MAX_IMAGES_PER_MEMORY = 50  # Increased for testing (was 5)
+PHOTO_MAX_MEMORIES_PER_USER = 50  # Increased for testing (was 3)
 _photo_rate_state: Dict[str, Any] = {
     "per_memory": {},
     "per_user": {},
@@ -700,6 +700,34 @@ async def get_life_story_phases():
         })
     
     return {"phases": phases, "total_phases": len(phases)}
+
+
+class UpdateLifeStoryImagesRequest(BaseModel):
+    user_id: str
+    session_id: str
+    images: dict  # {chapter_index: base64_image_data}
+
+@app.patch("/life-story/update-images")
+async def update_life_story_images(request: UpdateLifeStoryImagesRequest):
+    """
+    Update a life story session with generated images.
+    
+    Saves image data for each chapter of a completed life story by updating
+    the story_chunks metadata in the memory service.
+    """
+    if not cognitive_tools:
+        raise HTTPException(status_code=503, detail="Cognitive tools not initialized")
+    
+    try:
+        result = await cognitive_tools.life_story_adapter.update_session_images(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            images=request.images
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error updating life story images: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update life story images")
 
 
 if __name__ == "__main__":
