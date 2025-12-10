@@ -33,10 +33,10 @@ logger.info(
     "CognitiveConfig loaded | security_service_url=%s",
     config.security_service_url,
 )
-TOGETHER_FLUX_MODEL = "black-forest-labs/FLUX.1-dev"
-PHOTO_RATE_WINDOW_SECONDS = 3600
-PHOTO_MAX_IMAGES_PER_MEMORY = 50  # Increased for testing (was 5)
-PHOTO_MAX_MEMORIES_PER_USER = 50  # Increased for testing (was 3)
+TOGETHER_FLUX_MODEL = "black-forest-labs/FLUX.2-pro"
+PHOTO_RATE_WINDOW_SECONDS = 21600  # 6 hours
+PHOTO_MAX_IMAGES_PER_MEMORY = 10  # Max images per single memory per 6 hours
+PHOTO_MAX_MEMORIES_PER_USER = 10  # Max memories with images per user per 6 hours
 _photo_rate_state: Dict[str, Any] = {
     "per_memory": {},
     "per_user": {},

@@ -6,6 +6,7 @@ Each session captures memories across life phases with high-sensitivity
 ELR tagging for privacy-first handling.
 """
 import uuid
+import logging
 from enum import Enum
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
@@ -13,6 +14,8 @@ from datetime import datetime
 import httpx
 
 from ..config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 class LifeStoryPhase(str, Enum):
@@ -225,7 +228,8 @@ class LifeStoryAdapter:
     
     def __init__(self):
         self.config = get_config()
-        self.memory_service_url = self.config.memory_service_url
+        # Strip trailing slash to prevent double-slash in URL paths
+        self.memory_service_url = self.config.memory_service_url.rstrip('/')
         self.client = httpx.AsyncClient(timeout=30.0)
     
     async def close(self):
@@ -329,6 +333,7 @@ class LifeStoryAdapter:
         summary: Optional[str] = None,
     ) -> LifeStorySession:
         """Mark session as completed and store the complete life story"""
+        logger.info(f"Completing Life Story session {session.session_id} for user {session.user_id} with {len(session.chunks)} chunks")
         session.status = "completed"
         session.completed_at = datetime.utcnow()
         
@@ -422,11 +427,12 @@ class LifeStoryAdapter:
             )
             
             if response.status_code != 200:
-                print(f"ELR storage failed with status {response.status_code}: {response.text}")
+                logger.error(f"ELR chunk storage failed with status {response.status_code}: {response.text}")
+                return False
             
-            return response.status_code == 200
+            return True
         except Exception as e:
-            print(f"Error storing chunk as ELR: {e}")
+            logger.error(f"Error storing chunk as ELR: {e}", exc_info=True)
             # Don't fail the session if ELR storage fails
             return False
     
@@ -472,17 +478,22 @@ class LifeStoryAdapter:
                 "consent_level": "private"
             }
             
+            logger.info(f"Storing Life Story to ELR for user {session.user_id}, session {session.session_id}")
+            logger.debug(f"Memory data: {memory_data}")
+            
             response = await self.client.post(
                 f"{self.memory_service_url}/ingestion/elr",
                 json=memory_data
             )
             
             if response.status_code != 200:
-                print(f"ELR summary storage failed with status {response.status_code}: {response.text}")
+                logger.error(f"ELR summary storage failed with status {response.status_code}: {response.text}")
+                return False
             
-            return response.status_code == 200
+            logger.info(f"Life Story successfully saved to ELR for user {session.user_id}")
+            return True
         except Exception as e:
-            print(f"Error storing session summary as ELR: {e}")
+            logger.error(f"Error storing session summary as ELR: {e}", exc_info=True)
             # Don't fail if ELR storage fails
             return False
     
