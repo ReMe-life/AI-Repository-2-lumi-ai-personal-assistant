@@ -5,6 +5,7 @@ FastAPI application for LUKi Cognitive Modules
 import os
 import asyncio
 import hashlib
+import base64
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -484,9 +485,7 @@ async def generate_photo_reminiscence_images(
             result = client.images.generate(
                 prompt=prompt,
                 model=TOGETHER_FLUX_MODEL,
-                steps=10,
                 n=n,
-                response_format="b64_json",
             )
             images: List[Dict[str, Any]] = []
             data = getattr(result, "data", None) or []
@@ -498,16 +497,30 @@ async def generate_photo_reminiscence_images(
             for index, item in enumerate(data):
                 if isinstance(item, dict):
                     b64 = item.get("b64_json")
+                    url = item.get("url")
                     img_prompt = item.get("prompt", prompt)
                     width = item.get("width")
                     height = item.get("height")
                     model_name = item.get("model", TOGETHER_FLUX_MODEL)
                 else:
                     b64 = getattr(item, "b64_json", None)
+                    url = getattr(item, "url", None)
                     img_prompt = getattr(item, "prompt", prompt)
                     width = getattr(item, "width", None)
                     height = getattr(item, "height", None)
                     model_name = getattr(item, "model", TOGETHER_FLUX_MODEL)
+                
+                # Handle URL response by fetching and converting to base64
+                if not b64 and url:
+                    try:
+                        with httpx.Client(timeout=30.0) as http_client:
+                            img_response = http_client.get(url)
+                            img_response.raise_for_status()
+                            b64 = base64.b64encode(img_response.content).decode('utf-8')
+                        logger.info("PhotoReminiscence: converted URL to b64 for index=%d", index)
+                    except Exception as fetch_err:
+                        logger.warning("PhotoReminiscence: failed to fetch URL for index=%d: %s", index, fetch_err)
+                
                 if not b64:
                     # Introspect structure so we can see what fields Together is returning
                     try:
