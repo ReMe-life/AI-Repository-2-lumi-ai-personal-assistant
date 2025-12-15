@@ -36,8 +36,15 @@ logger.info(
 )
 TOGETHER_FLUX_MODEL = "black-forest-labs/FLUX.2-pro"
 PHOTO_RATE_WINDOW_SECONDS = 21600  # 6 hours
-PHOTO_MAX_IMAGES_PER_MEMORY = 10  # Max images per single memory per 6 hours
-PHOTO_MAX_MEMORIES_PER_USER = 10  # Max memories with images per user per 6 hours
+
+# Tier-based image generation limits per 6-hour window
+ACCOUNT_TIER_IMAGE_LIMITS: Dict[str, int] = {
+    "free": 10,
+    "plus": 50,
+    "pro": 200,
+}
+PHOTO_MAX_IMAGES_PER_MEMORY = 10  # Max images per single memory per 6 hours (shared across tiers)
+
 _photo_rate_state: Dict[str, Any] = {
     "per_memory": {},
     "per_user": {},
@@ -93,11 +100,28 @@ def _compute_photo_memory_id(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _photo_rate_check(user_id: str, memory_id: str, now: datetime) -> Optional[Dict[str, Any]]:
+def _photo_rate_check(
+    user_id: str, memory_id: str, now: datetime, account_tier: str = "free"
+) -> Optional[Dict[str, Any]]:
+    """Check if user has exceeded their tier-based image generation limit.
+    
+    Args:
+        user_id: The user's ID
+        memory_id: Hash of the memory/activity being generated
+        now: Current datetime
+        account_tier: User's subscription tier (free, plus, pro)
+    
+    Returns:
+        None if within limits, or a rate_limited dict if exceeded
+    """
     window = timedelta(seconds=PHOTO_RATE_WINDOW_SECONDS)
     state = _photo_rate_state
     per_memory = state["per_memory"]
     per_user = state["per_user"]
+    
+    # Get tier-based limit (default to free if unknown tier)
+    user_limit = ACCOUNT_TIER_IMAGE_LIMITS.get(account_tier, ACCOUNT_TIER_IMAGE_LIMITS["free"])
+    
     mem_key = f"{user_id}:{memory_id}"
     mem_entry = per_memory.get(mem_key)
     if mem_entry is not None:
@@ -108,30 +132,76 @@ def _photo_rate_check(user_id: str, memory_id: str, now: datetime) -> Optional[D
     else:
         mem_entry = {"window_start": now, "count": 0}
         per_memory[mem_key] = mem_entry
+    
     user_entry = per_user.get(user_id)
     if user_entry is not None:
         start = user_entry.get("window_start")
         if isinstance(start, datetime) and now - start >= window:
             user_entry["window_start"] = now
-            user_entry["memory_ids"] = set()
+            user_entry["total_images"] = 0
     else:
-        user_entry = {"window_start": now, "memory_ids": set()}
+        user_entry = {"window_start": now, "total_images": 0}
         per_user[user_id] = user_entry
+    
+    # Check per-memory limit (prevents spamming regenerate on same memory)
     if mem_entry.get("count", 0) >= PHOTO_MAX_IMAGES_PER_MEMORY:
         return {
             "status": "rate_limited",
             "scope": "per_memory",
             "message": "Image limit reached for this memory. Please try again later.",
         }
-    memory_ids = user_entry.get("memory_ids") or set()
-    is_new_memory = memory_id not in memory_ids
-    if is_new_memory and len(memory_ids) >= PHOTO_MAX_MEMORIES_PER_USER:
+    
+    # Check tier-based total image limit
+    current_total = user_entry.get("total_images", 0)
+    if current_total >= user_limit:
+        tier_display = account_tier.capitalize() if account_tier != "free" else "Free"
         return {
             "status": "rate_limited",
             "scope": "per_user",
-            "message": "Image limit reached for now. Please try again later.",
+            "message": f"You've reached your {tier_display} plan limit of {user_limit} images per 6 hours. Please try again later or upgrade your plan.",
+            "limit": user_limit,
+            "used": current_total,
+            "remaining": 0,
+            "tier": account_tier,
+            "reset_window_seconds": PHOTO_RATE_WINDOW_SECONDS,
         }
+    
     return None
+
+
+def _get_photo_usage(user_id: str, account_tier: str = "free") -> Dict[str, Any]:
+    """Get current image usage for a user.
+    
+    Returns:
+        Dict with used, limit, tier, remaining
+    """
+    tier = account_tier.lower() if account_tier else "free"
+    user_limit = ACCOUNT_TIER_IMAGE_LIMITS.get(tier, ACCOUNT_TIER_IMAGE_LIMITS["free"])
+    
+    state = _photo_rate_state
+    per_user = state["per_user"]
+    user_entry = per_user.get(user_id)
+    
+    now = datetime.utcnow()
+    window = timedelta(seconds=PHOTO_RATE_WINDOW_SECONDS)
+    
+    if user_entry is not None:
+        start = user_entry.get("window_start")
+        if isinstance(start, datetime) and now - start >= window:
+            # Window expired, reset
+            used = 0
+        else:
+            used = user_entry.get("total_images", 0)
+    else:
+        used = 0
+    
+    return {
+        "used": used,
+        "limit": user_limit,
+        "tier": tier,
+        "remaining": max(0, user_limit - used),
+        "reset_window_seconds": PHOTO_RATE_WINDOW_SECONDS,
+    }
 
 
 def _photo_rate_record(
@@ -140,27 +210,28 @@ def _photo_rate_record(
     now: datetime,
     image_count: int,
 ) -> None:
+    """Record successful image generation for rate limiting tracking."""
     if image_count <= 0:
         return
     window = timedelta(seconds=PHOTO_RATE_WINDOW_SECONDS)
     state = _photo_rate_state
     per_memory = state["per_memory"]
     per_user = state["per_user"]
+    
+    # Update per-memory count
     mem_key = f"{user_id}:{memory_id}"
     mem_entry = per_memory.get(mem_key)
     if mem_entry is None or not isinstance(mem_entry.get("window_start"), datetime) or now - mem_entry["window_start"] >= window:
         mem_entry = {"window_start": now, "count": 0}
         per_memory[mem_key] = mem_entry
     mem_entry["count"] = int(mem_entry.get("count", 0)) + image_count
+    
+    # Update per-user total images count
     user_entry = per_user.get(user_id)
     if user_entry is None or not isinstance(user_entry.get("window_start"), datetime) or now - user_entry["window_start"] >= window:
-        user_entry = {"window_start": now, "memory_ids": set()}
+        user_entry = {"window_start": now, "total_images": 0}
         per_user[user_id] = user_entry
-    memory_ids = user_entry.get("memory_ids")
-    if not isinstance(memory_ids, set):
-        memory_ids = set()
-        user_entry["memory_ids"] = memory_ids
-    memory_ids.add(memory_id)
+    user_entry["total_images"] = int(user_entry.get("total_images", 0)) + image_count
 
 
 async def _enforce_cognitive_policy(
@@ -294,11 +365,22 @@ class PhotoReminiscenceImageRequest(BaseModel):
     activity_title: Optional[str] = None
     answers: List[str]
     n: Optional[int] = 1
+    account_tier: Optional[str] = "free"  # free, plus, pro - determines image generation limits
+
+
+class ImageUsageInfo(BaseModel):
+    """Usage info for image generation rate limiting."""
+    used: int
+    limit: int
+    tier: str
+    remaining: int
+    reset_window_seconds: int = PHOTO_RATE_WINDOW_SECONDS
 
 
 class PhotoReminiscenceImageResponse(BaseModel):
     status: str
     images: List[GeneratedImage]
+    usage: Optional[ImageUsageInfo] = None
 
 # Health check endpoint
 @app.get("/health", response_model=HealthResponse)
@@ -464,7 +546,8 @@ async def generate_photo_reminiscence_images(
     try:
         memory_id = _compute_photo_memory_id(request.activity_title, request.answers)
         now = datetime.utcnow()
-        rate_error = _photo_rate_check(request.user_id, memory_id, now)
+        account_tier = (request.account_tier or "free").lower()
+        rate_error = _photo_rate_check(request.user_id, memory_id, now, account_tier)
         if rate_error:
             raise HTTPException(status_code=429, detail=rate_error)
         prompt = _build_photo_reminiscence_prompt(request.activity_title, request.answers)
@@ -568,7 +651,12 @@ async def generate_photo_reminiscence_images(
             )
         _photo_rate_record(request.user_id, memory_id, datetime.utcnow(), len(images))
         parsed_images = [GeneratedImage(**item) for item in images]
-        return PhotoReminiscenceImageResponse(status="ok", images=parsed_images)
+        
+        # Get updated usage info after recording the new images
+        usage_data = _get_photo_usage(request.user_id, account_tier)
+        usage_info = ImageUsageInfo(**usage_data)
+        
+        return PhotoReminiscenceImageResponse(status="ok", images=parsed_images, usage=usage_info)
     except HTTPException:
         raise
     except Exception as e:
