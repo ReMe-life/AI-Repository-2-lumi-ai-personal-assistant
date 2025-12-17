@@ -34,7 +34,8 @@ logger.info(
     "CognitiveConfig loaded | security_service_url=%s",
     config.security_service_url,
 )
-TOGETHER_FLUX_MODEL = "black-forest-labs/FLUX.2-pro"
+TOGETHER_FLUX_MODEL = "black-forest-labs/FLUX.1-schnell"
+TOGETHER_FLUX_FALLBACK_MODEL = "black-forest-labs/FLUX.1-dev"
 PHOTO_RATE_WINDOW_SECONDS = 21600  # 6 hours
 
 # Tier-based image generation limits per 6-hour window
@@ -559,17 +560,38 @@ async def generate_photo_reminiscence_images(
 
         def _call_together() -> List[Dict[str, Any]]:
             client = Together()
-            logger.info(
-                "PhotoReminiscence: calling Together images.generate | model=%s, n=%s",
-                TOGETHER_FLUX_MODEL,
-                n,
-            )
-            logger.info("PhotoReminiscence: prompt (first 400 chars): %s", prompt[:400])
-            result = client.images.generate(
-                prompt=prompt,
-                model=TOGETHER_FLUX_MODEL,
-                n=n,
-            )
+            models_to_try = [TOGETHER_FLUX_MODEL, TOGETHER_FLUX_FALLBACK_MODEL]
+            result = None
+            last_error = None
+            
+            for model in models_to_try:
+                try:
+                    logger.info(
+                        "PhotoReminiscence: calling Together images.generate | model=%s, n=%s",
+                        model,
+                        n,
+                    )
+                    logger.info("PhotoReminiscence: prompt (first 400 chars): %s", prompt[:400])
+                    result = client.images.generate(
+                        prompt=prompt,
+                        model=model,
+                        n=n,
+                    )
+                    # If we got here, the call succeeded
+                    logger.info("PhotoReminiscence: Successfully generated with model=%s", model)
+                    break
+                except Exception as model_err:
+                    last_error = model_err
+                    logger.warning(
+                        "PhotoReminiscence: model %s failed with error: %s. Trying next model...",
+                        model,
+                        str(model_err)[:200]
+                    )
+                    continue
+            
+            if result is None:
+                logger.error("PhotoReminiscence: All models failed. Last error: %s", last_error)
+                raise last_error or Exception("All image generation models failed")
             images: List[Dict[str, Any]] = []
             data = getattr(result, "data", None) or []
             logger.info(
