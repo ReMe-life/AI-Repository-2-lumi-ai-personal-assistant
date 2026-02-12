@@ -6,6 +6,7 @@ import os
 import asyncio
 import hashlib
 import base64
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,8 @@ import httpx
 from together import Together
 
 from .config import CognitiveConfig
+from .service_resilience import ResilientServiceClient
+from .middleware import correlation_middleware, request_logging_middleware, get_trace_id
 
 
 
@@ -51,11 +54,43 @@ _photo_rate_state: Dict[str, Any] = {
     "per_user": {},
 }
 
+# Persistent resilient client for the security service.
+# Uses connection pooling and circuit breaker instead of per-request clients.
+_security_client: Optional[ResilientServiceClient] = None
+
+
+def _get_security_client() -> ResilientServiceClient:
+    """Lazy-initialise the shared security service client."""
+    global _security_client
+    if _security_client is None:
+        _security_client = ResilientServiceClient(
+            service_name="security",
+            base_url=config.security_service_url,
+            timeout=5.0,
+        )
+    return _security_client
+
+
+# ---------------------------------------------------------------------------
+# Application lifespan – initialise / tear down shared resources
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def _lifespan(app_instance: FastAPI):
+    logger.info("Cognitive module starting up")
+    # Ensure the security client is ready
+    _get_security_client()
+    yield
+    logger.info("Cognitive module shutting down")
+    if _security_client is not None:
+        await _security_client.close()
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="LUKi Cognitive Modules",
     description="Personalised activity creation, cognitive stimulation & wellbeing analytics",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=_lifespan,
 )
 
 def _consent_checks_enabled() -> bool:
@@ -242,6 +277,9 @@ async def _enforce_cognitive_policy(
 ) -> Dict[str, Any]:
     """Call security service policy/enforce for cognitive recommendations.
 
+    Uses the shared :class:`ResilientServiceClient` with circuit breaker
+    protection instead of creating a new HTTP client per request.
+
     Defaults to requesting personalization scope. When consent
     checks are disabled via configuration, this returns allowed=True without
     making an external call.
@@ -259,12 +297,19 @@ async def _enforce_cognitive_policy(
     if context:
         payload["context"] = context
 
+    # Propagate trace ID from inbound request to security service
+    headers: Dict[str, str] = {}
+    trace_id = get_trace_id()
+    if trace_id:
+        headers["X-Trace-ID"] = trace_id
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                f"{config.security_service_url}/policy/enforce",
-                json=payload,
-            )
+        client = _get_security_client()
+        response = await client.post(
+            "/policy/enforce",
+            json=payload,
+            headers=headers,
+        )
 
         try:
             raw = response.json()
@@ -316,6 +361,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register correlation and logging middleware (registered in reverse order;
+# last registered runs first).
+app.middleware("http")(request_logging_middleware)
+app.middleware("http")(correlation_middleware)
 
 # Initialize components
 try:
@@ -385,19 +435,62 @@ class PhotoReminiscenceImageResponse(BaseModel):
 
 # Health check endpoint
 @app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint for Railway deployment"""
+async def health_check(deep: bool = False):
+    """Health check endpoint for Railway deployment.
+
+    With ``?deep=true``, additionally checks the security service
+    reachability and reports circuit breaker status.
+    """
     components = {
         "activity_recommender": "healthy" if activity_recommender else "error",
         "activity_catalog": "healthy" if activity_catalog else "error",
-        "cognitive_tools": "healthy" if cognitive_tools else "error"
+        "cognitive_tools": "healthy" if cognitive_tools else "error",
     }
-    
-    return HealthResponse(
-        status="healthy" if all(status == "healthy" for status in components.values()) else "degraded",
-        version="0.1.0",
-        components=components
+
+    if deep and _security_client is not None:
+        try:
+            resp = await _security_client.get("/health")
+            components["security_service"] = (
+                "healthy" if resp.status_code == 200 else "degraded"
+            )
+        except Exception:
+            components["security_service"] = "unreachable"
+        components["security_circuit"] = _security_client.circuit_status.get(
+            "state", "unknown"
+        )
+
+    overall = (
+        "healthy"
+        if all(v == "healthy" for k, v in components.items() if k != "security_circuit")
+        else "degraded"
     )
+
+    return HealthResponse(
+        status=overall,
+        version="0.1.0",
+        components=components,
+    )
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """Expose performance and recommendation quality metrics.
+
+    Returns data collected by the PerformanceMonitor including per-operation
+    latency, error rates, and recommendation quality tracking.
+    """
+    from .utils.performance_monitor import get_performance_monitor
+
+    monitor = get_performance_monitor()
+    return {
+        "health": monitor.get_health_status(),
+        "operations": monitor.get_all_operation_stats(),
+        "recommendations": monitor.get_global_recommendation_metrics(),
+        "recent_errors": monitor.get_recent_errors(limit=5),
+        "security_circuit": (
+            _security_client.circuit_status if _security_client else None
+        ),
+    }
 
 # Root endpoint
 @app.get("/")
