@@ -7,8 +7,10 @@ Core recommendation system that combines:
 - ReMeLife activity catalog
 - Cognitive level adaptation
 - Engagement history learning
+- LRU recommendation cache for repeated requests
 """
 import asyncio
+import logging
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime, date
@@ -18,6 +20,9 @@ import math
 from ..data.activity_catalog import ActivityCatalog, Activity, ActivityType, ActivityModule, CognitiveLevel
 from ..data.elr_adapter import ELRAdapter, ELRProfile, ActivityEngagement
 from ..config import get_config
+from ..utils.recommendation_cache import get_recommendation_cache
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,34 +81,64 @@ class ActivityRecommender:
         """Close resources"""
         await self.elr_adapter.close()
     
-    async def get_recommendations(self, 
+    async def get_recommendations(self,
                                 context: RecommendationContext,
                                 max_recommendations: Optional[int] = None) -> List[ActivityRecommendation]:
-        """Get personalized activity recommendations"""
+        """Get personalized activity recommendations.
+
+        Results are cached per user+context using :class:`RecommendationCache`
+        so rapid successive requests (e.g. page reloads, retries) avoid
+        redundant scoring work.
+        """
         if max_recommendations is None:
             max_recommendations = self.config.max_recommendations
-        
+
+        # Build cache-compatible parameters.  The cache keys on
+        # (user_id, interests_list, difficulty) – we encode the context
+        # parameters as "interests" so the existing cache key generation
+        # produces a unique hash for each context combination.
+        cache = get_recommendation_cache()
+        cache_interests = [
+            context.current_mood or "none",
+            str(context.available_duration or 0),
+            "group" if context.group_setting else "solo",
+        ]
+        cache_difficulty = float(max_recommendations)
+
+        cached = cache.get(context.user_id, cache_interests, cache_difficulty)
+        if cached is not None:
+            logger.debug("Recommendation cache hit for user %s", context.user_id)
+            # Cached data is a list of dicts; convert back to objects only if
+            # they were stored as dicts.  If they're already recommendation
+            # objects we can return directly.
+            return cached  # type: ignore[return-value]
+
         # Get user's ELR profile and history
         elr_profile = await self.elr_adapter.get_user_elr_profile(context.user_id)
         activity_history = await self.elr_adapter.get_user_activity_history(context.user_id)
-        
+
         if not elr_profile:
-            # Return default recommendations for new users
-            return await self._get_default_recommendations(context, max_recommendations)
-        
+            defaults = await self._get_default_recommendations(context, max_recommendations)
+            cache.set(context.user_id, cache_interests, defaults, cache_difficulty)
+            return defaults
+
         # Get candidate activities based on context
         candidates = self._get_candidate_activities(context, elr_profile)
-        
+
         # Score each candidate activity
         scored_recommendations = []
         for activity in candidates:
             recommendation = await self._score_activity(activity, context, elr_profile, activity_history)
             if recommendation.score >= self.config.recommendation_threshold:
                 scored_recommendations.append(recommendation)
-        
+
         # Sort by score and return top recommendations
         scored_recommendations.sort(key=lambda x: x.score, reverse=True)
-        return scored_recommendations[:max_recommendations]
+        result = scored_recommendations[:max_recommendations]
+
+        # Store in cache for subsequent identical requests
+        cache.set(context.user_id, cache_interests, result, cache_difficulty)
+        return result
     
     def _get_candidate_activities(self, context: RecommendationContext, profile: ELRProfile) -> List[Activity]:
         """Get candidate activities based on context and profile"""
