@@ -20,6 +20,8 @@ from together import Together
 from .config import CognitiveConfig
 from .service_resilience import ResilientServiceClient
 from .middleware import correlation_middleware, request_logging_middleware, get_trace_id
+from .graceful_degradation import FallbackStrategy
+from .utils.performance_monitor import get_performance_monitor
 
 
 
@@ -379,6 +381,10 @@ except Exception as e:
     activity_catalog = None
     cognitive_tools = None
 
+# Graceful degradation and performance tracking
+_fallback_strategy = FallbackStrategy()
+_perf_monitor = get_performance_monitor()
+
 # Request/Response models
 class RecommendationRequest(BaseModel):
     user_id: str
@@ -506,10 +512,18 @@ async def root():
 # Activity recommendations endpoint
 @app.post("/recommendations", response_model=RecommendationResponse)
 async def get_recommendations(request: RecommendationRequest):
-    """Get personalized activity recommendations"""
+    """Get personalized activity recommendations.
+
+    Uses :class:`FallbackStrategy` so users still get results even if the
+    primary recommendation engine is degraded, and
+    :class:`PerformanceMonitor` to track latency and quality.
+    """
     if not cognitive_tools:
         raise HTTPException(status_code=503, detail="Cognitive tools not available")
-    
+
+    import time as _time
+    _start = _time.monotonic()
+
     try:
         policy = await _enforce_cognitive_policy(
             user_id=request.user_id,
@@ -537,27 +551,53 @@ async def get_recommendations(request: RecommendationRequest):
         available_duration = request.available_duration or context_data.get("available_duration")
         specific_request = request.specific_request or context_data.get("specific_request")
         max_recommendations = request.max_recommendations or config.max_recommendations
-        result = await cognitive_tools.recommend_activity(
+
+        # Define the primary strategy as an async callable for the fallback
+        async def _primary_recommend(**_kw):
+            r = await cognitive_tools.recommend_activity(
+                user_id=request.user_id,
+                current_mood=current_mood,
+                available_duration=available_duration,
+                carer_available=request.carer_available,
+                group_setting=request.group_setting,
+                specific_request=specific_request,
+                max_recommendations=max_recommendations,
+            )
+            if not r.get("success"):
+                raise RuntimeError(r.get("error", "recommendation engine failed"))
+            return {"recommendations": r.get("recommendations", [])}
+
+        # Use fallback strategy to guarantee a response
+        fallback_result = await _fallback_strategy.get_recommendations_with_fallback(
+            primary_strategy=_primary_recommend,
             user_id=request.user_id,
             current_mood=current_mood,
             available_duration=available_duration,
-            carer_available=request.carer_available,
-            group_setting=request.group_setting,
-            specific_request=specific_request,
-            max_recommendations=max_recommendations,
         )
-        if not result.get("success"):
-            logger.error(f"Error generating recommendations: {result.get('error')}")
-            raise HTTPException(status_code=500, detail="Failed to generate recommendations")
-        recommendations = result.get("recommendations", [])
+
+        recommendations = fallback_result.get("recommendations", [])
+
+        # Record performance signal
+        _perf_monitor.record_operation(
+            "recommendations",
+            _time.monotonic() - _start,
+            success=True,
+        )
+
         return RecommendationResponse(
             recommendations=recommendations,
             user_id=request.user_id,
-            timestamp=datetime.utcnow().isoformat()
+            timestamp=datetime.utcnow().isoformat(),
         )
     except HTTPException:
+        _perf_monitor.record_operation(
+            "recommendations", _time.monotonic() - _start, success=False,
+        )
         raise
     except Exception as e:
+        _perf_monitor.record_operation(
+            "recommendations", _time.monotonic() - _start, success=False,
+        )
         logger.error(f"Error generating recommendations: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate recommendations")
 
