@@ -68,7 +68,7 @@ class PerformanceMonitor:
         Args:
             window_size: Number of recent operations to track
         """
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._window_size = window_size
         
         # Operation latency tracking
