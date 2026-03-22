@@ -2,22 +2,14 @@
 Configuration for LUKi Cognitive Modules
 """
 import os
-from typing import Optional, List
+from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
 def _get_default_security_url() -> str:
-    """Auto-detect production environment and return appropriate security service URL."""
-    # Check for staging environment first
-    env = os.getenv("RAILWAY_ENVIRONMENT", "").lower()
-    if "staging" in env:
-        return "https://dynamic-curiosity-staging.up.railway.app"
-    
-    # Railway sets RAILWAY_ENVIRONMENT or RAILWAY_PROJECT_ID in production
-    if env == "production" or os.getenv("RAILWAY_PROJECT_ID"):
-        return "https://luki-security-privacy-production.up.railway.app"
-    return "http://localhost:8103"
+    """Return security service URL from environment."""
+    return os.getenv("COGNITIVE_SECURITY_SERVICE_URL", "http://localhost:8103")
 
 
 class CognitiveConfig(BaseSettings):
