@@ -228,3 +228,7 @@ logs/
 
 # Notebooks
 .ipynb_checkpoints/
+.DS_Store
+
+# Railway deployment (local-only)
+.railwayignore

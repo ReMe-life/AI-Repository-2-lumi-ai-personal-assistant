@@ -1,0 +1,9 @@
+.git/
+.venv/
+__pycache__/
+tests/
+*.md
+LICENSE
+.gitignore
+.railwayignore
+.DS_Store
