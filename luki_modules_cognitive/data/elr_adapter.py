@@ -6,7 +6,10 @@ for activity recommendations and personalization.
 """
 import asyncio
 import json
+import logging
 from typing import Dict, List, Optional, Any, Tuple
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import httpx
@@ -142,7 +145,7 @@ class ELRAdapter:
             self._profiles[profile.user_id] = profile
             return True
         except Exception as e:
-            print(f"Error updating ELR profile: {e}")
+            logger.error(f"Error updating ELR profile: {e}")
             return False
     
     async def get_user_activity_history(self, user_id: str, days: int = 30) -> List[ActivityEngagement]:
@@ -161,7 +164,7 @@ class ELRAdapter:
             return sorted(recent, key=lambda x: x.timestamp, reverse=True)
             
         except Exception as e:
-            print(f"Error retrieving activity history: {e}")
+            logger.error(f"Error retrieving activity history: {e}")
             return []
     
     async def record_activity_engagement(self, engagement: ActivityEngagement) -> bool:
@@ -185,7 +188,7 @@ class ELRAdapter:
             return True
             
         except Exception as e:
-            print(f"Error recording activity engagement: {e}")
+            logger.error(f"Error recording activity engagement: {e}")
             return False
     
     async def get_user_preferences_for_activity_type(self, user_id: str, activity_type: str) -> Dict[str, Any]:
@@ -254,7 +257,7 @@ class ELRAdapter:
             return []
             
         except Exception as e:
-            print(f"Error searching ELR memories: {e}")
+            logger.error(f"Error searching ELR memories: {e}")
             return []
     
     async def get_family_context(self, user_id: str) -> Dict[str, Any]:

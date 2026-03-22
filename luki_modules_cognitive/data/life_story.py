@@ -367,7 +367,7 @@ class LifeStoryAdapter:
             
             return True
         except Exception as e:
-            print(f"Error deleting session: {e}")
+            logger.error(f"Error deleting session: {e}")
             return False
     
     async def _save_session(self, session: LifeStorySession) -> bool:
@@ -384,7 +384,7 @@ class LifeStoryAdapter:
             
             return True
         except Exception as e:
-            print(f"Error saving session: {e}")
+            logger.error(f"Error saving session: {e}")
             return False
     
     async def _store_chunk_as_elr(self, chunk: LifeStoryChunk) -> bool:
@@ -587,7 +587,7 @@ class LifeStoryAdapter:
             )
             
             if search_response.status_code != 200:
-                print(f"Failed to find life story memory: {search_response.text}")
+                logger.warning(f"Failed to find life story memory: {search_response.text}")
                 return {"success": False, "message": "Could not find life story memory"}
             
             search_result = search_response.json()
@@ -595,7 +595,7 @@ class LifeStoryAdapter:
             
             if not memories:
                 # Try a broader search
-                print(f"No memories found for session {session_id}, trying broader search")
+                logger.info(f"No memories found for session {session_id}, trying broader search")
                 return {"success": False, "message": "Life story memory not found"}
             
             # Find the memory with matching session_id
@@ -616,7 +616,7 @@ class LifeStoryAdapter:
             story_chunks_json = metadata.get("story_chunks", "[]")
             try:
                 story_chunks = json.loads(story_chunks_json)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 story_chunks = []
             
             # Update chunks with image data
@@ -637,7 +637,7 @@ class LifeStoryAdapter:
             )
             
             if update_response.status_code != 200:
-                print(f"Failed to update memory: {update_response.text}")
+                logger.warning(f"Failed to update memory: {update_response.text}")
                 return {"success": False, "message": "Failed to update memory with images"}
             
             return {
@@ -647,5 +647,5 @@ class LifeStoryAdapter:
             }
             
         except Exception as e:
-            print(f"Error updating session images: {e}")
+            logger.error(f"Error updating session images: {e}")
             return {"success": False, "message": str(e)}

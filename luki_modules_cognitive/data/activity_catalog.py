@@ -7,7 +7,10 @@ Manages the catalog of activities from RemindMeCare system including:
 - Group Module activities (group video, group music sessions)
 """
 import json
+import logging
 from typing import Dict, List, Optional, Any
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass, asdict
 from datetime import datetime, date
 from enum import Enum
@@ -338,4 +341,4 @@ class ActivityCatalog:
                     activity = Activity.from_dict(activity_data)
                     self.add_activity(activity)
                 except Exception as e:
-                    print(f"Error importing activity {activity_id}: {e}")
+                    logger.error(f"Error importing activity {activity_id}: {e}")
