@@ -4,8 +4,8 @@ Provides context-aware activity suggestions based on international observances
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, date
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, date, timedelta
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -202,7 +202,7 @@ class WorldDayCalendar:
         
         return upcoming
     
-    def get_world_day_context(self) -> Dict[str, any]:
+    def get_world_day_context(self) -> Dict[str, Any]:
         """
         Get context about today's World Days for activity recommendations
         
@@ -301,6 +301,5 @@ class WorldDayActivityMatcher:
 
 
 # Global instances
-from datetime import timedelta
 world_day_calendar = WorldDayCalendar()
 world_day_matcher = WorldDayActivityMatcher(world_day_calendar)

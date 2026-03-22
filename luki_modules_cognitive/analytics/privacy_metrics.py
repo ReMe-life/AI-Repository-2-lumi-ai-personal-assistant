@@ -38,7 +38,8 @@ class DifferentialPrivacy:
             Noisy value
         """
         scale = sensitivity / self.epsilon
-        noise = random.laplace(0, scale)
+        # Laplace noise via difference of two exponentials (stdlib only)
+        noise = random.expovariate(1.0 / scale) - random.expovariate(1.0 / scale)
         return value + noise
     
     def add_gaussian_noise(self, value: float, sensitivity: float = 1.0) -> float:

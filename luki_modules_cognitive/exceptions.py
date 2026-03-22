@@ -172,7 +172,7 @@ class DataQualityError(CognitiveModuleError):
         )
 
 
-class PermissionError(CognitiveModuleError):
+class CognitivePermissionError(CognitiveModuleError):
     """Permission denied error"""
     
     def __init__(self, message: str, user_id: str, action: str, **kwargs):
