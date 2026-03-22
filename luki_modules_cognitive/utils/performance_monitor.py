@@ -376,7 +376,9 @@ def get_performance_monitor() -> PerformanceMonitor:
 
 def track_performance(operation: str):
     """Decorator to track operation performance"""
+    import functools
     def decorator(func):
+        @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
             start_time = time.time()
             success = True
@@ -398,6 +400,7 @@ def track_performance(operation: str):
                     error_type=error_type
                 )
         
+        @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
             start_time = time.time()
             success = True
